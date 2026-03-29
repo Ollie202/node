@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use miden_protocol::Word;
@@ -70,9 +70,17 @@ impl GraphNode for Arc<AuthenticatedTransaction> {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct TransactionGraph {
     inner: Graph<Arc<AuthenticatedTransaction>>,
+    /// The number of failures a transaction has participated in.
+    ///
+    /// These are batch or block proving errors in which the transaction was a part of. This is
+    /// used to identify potentially buggy transactions that should be evicted.
+    failures: HashMap<TransactionId, u32>,
 }
 
 impl TransactionGraph {
+    /// Transactions are evicted after failing this number of times.
+    pub const FAILURE_LIMIT: u32 = 3;
+
     pub fn append(&mut self, tx: Arc<AuthenticatedTransaction>) -> Result<(), StateConflict> {
         self.inner.append(tx)
     }
@@ -102,19 +110,7 @@ impl TransactionGraph {
     /// Only unselected transactions are considered; selected transactions are assumed to be in
     /// committed blocks and should not be reverted.
     ///
-    /// This is because we don't distinguish between committed and selected transactions. If we
-    /// didn't ignore selected transactions here, we would revert committed ones as well, which
-    /// breaks the state.
-    ///
     /// Returns the identifiers of transactions that were removed from the graph.
-    ///
-    /// # Note
-    ///
-    /// Since this _ignores_ selected transactions, and the purpose is to revert expired
-    /// transactions after a block is committed, the caller **must** ensure that selected
-    /// transactions from expired batches (and therefore not committed) are deselected
-    /// _before_ calling this function. i.e. first revert expired batches and deselect their
-    /// transactions, then call this.
     pub fn revert_expired(&mut self, chain_tip: BlockNumber) -> HashSet<TransactionId> {
         self.inner
             .revert_expired_unselected(chain_tip)
@@ -134,11 +130,18 @@ impl TransactionGraph {
             return Vec::default();
         }
 
-        self.inner
+        let reverted = self
+            .inner
             .revert_node_and_descendants(transaction)
             .into_iter()
             .map(|tx| tx.id())
-            .collect()
+            .collect();
+
+        for tx in &reverted {
+            self.failures.remove(tx);
+        }
+
+        reverted
     }
 
     /// Marks the batch's transactions are ready for selection again.
@@ -146,10 +149,38 @@ impl TransactionGraph {
     /// # Panics
     ///
     /// Panics if the given batch has any child batches which are still in flight.
-    pub fn requeue_transactions(&mut self, batch: SelectedBatch) {
-        for tx in batch.into_transactions().iter().rev() {
+    pub fn requeue_transactions(&mut self, batch: &SelectedBatch) {
+        for tx in batch.transactions().iter().rev() {
             self.inner.deselect(tx.id());
         }
+    }
+
+    /// Increments each transaction's failure counter, and reverts transactions which exceed the
+    /// failure limit.
+    ///
+    /// This weeds out transactions which participate in batch and block failures, and might be the
+    /// root cause.
+    pub fn increment_failure_count(
+        &mut self,
+        txs: impl Iterator<Item = TransactionId>,
+    ) -> HashSet<TransactionId> {
+        let mut to_revert = Vec::default();
+
+        for tx in txs {
+            let count = self.failures.entry(tx).or_default();
+            *count += 1;
+
+            if *count >= Self::FAILURE_LIMIT {
+                to_revert.push(tx);
+            }
+        }
+
+        let mut reverted = HashSet::default();
+        for tx in to_revert {
+            reverted.extend(self.revert_tx_and_descendants(tx));
+        }
+
+        reverted
     }
 
     /// Prunes the given transaction.
@@ -160,6 +191,7 @@ impl TransactionGraph {
     /// graph.
     pub fn prune(&mut self, transaction: TransactionId) {
         self.inner.prune(transaction);
+        self.failures.remove(&transaction);
     }
 
     /// Number of transactions which have not been selected for inclusion in a batch.
