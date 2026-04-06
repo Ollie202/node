@@ -1,5 +1,7 @@
 # Changelog
 
+## v0.13.10 (2026-04-07)
+
 ## v0.13.9 (2026-03-26)
 
 - Network transaction actors now share the same gRPC clients, limiting the number of file descriptors being used ([#1808](https://github.com/0xMiden/node/issues/1808)).
