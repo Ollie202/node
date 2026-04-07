@@ -1,11 +1,11 @@
 # Changelog
 
-## v0.14.2
+## v0.14.2 (2026-04-07)
 
 - Added inclusion proofs to `SyncTransactions` output notes ([#1893](https://github.com/0xMiden/node/pull/1893)).
 - Added `block_header` field to `SyncChainMmrResponse` so clients can obtain the `block_to` block header without a separate request ([#1881](https://github.com/0xMiden/node/pull/1881)).
 
-## v0.14.1 (2025-04-02)
+## v0.14.1 (2026-04-02)
 
 - Fixed batch building issue with unauthenticated notes consumed in the same batch as they were created ([#1875](https://github.com/0xMiden/node/issues/1875)).
 
