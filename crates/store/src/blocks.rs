@@ -83,9 +83,9 @@ impl BlockStore {
     #[instrument(
         target = COMPONENT,
         name = "store.block_store.save_block",
-        skip(self, data),
+        skip_all,
         err,
-        fields(block_size = data.len())
+        fields(block.number = block_num.as_u32(),  block.size = data.len())
     )]
     pub async fn save_block(&self, block_num: BlockNumber, data: &[u8]) -> std::io::Result<()> {
         let (epoch_path, block_path) = self.epoch_block_path(block_num)?;

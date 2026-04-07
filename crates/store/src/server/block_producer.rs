@@ -14,7 +14,7 @@ use miden_protocol::batch::OrderedBatches;
 use miden_protocol::block::{BlockBody, BlockHeader, BlockNumber, SignedBlock};
 use miden_protocol::utils::serde::Deserializable;
 use tonic::{Request, Response, Status};
-use tracing::{Instrument, error};
+use tracing::error;
 
 use crate::errors::ApplyBlockError;
 use crate::server::api::{
@@ -89,44 +89,28 @@ impl block_producer_server::BlockProducer for StoreApi {
             block_inputs,
         };
 
-        // We perform the apply block work in a separate task. This prevents the caller
-        // cancelling the request and thereby cancelling the task at an arbitrary point of
-        // execution.
-        //
-        // Normally this shouldn't be a problem, however our apply_block isn't quite ACID compliant
-        // so things get a bit messy. This is more a temporary hack-around to minimize this risk.
-        let this = self.clone();
-        tokio::spawn(
-            async move {
-                let block_num = header.block_num();
-                let signed_block = SignedBlock::new(header, body, signature)
-                    .map_err(|err| Status::new(tonic::Code::Internal, err.as_report()))?;
-                // Note: This is an internal endpoint, so its safe to expose the full error
-                // report.
-                this.state
-                    .apply_block(signed_block, Some(proving_inputs))
-                    .await
-                    .inspect(|_| {
-                        if let Err(err) = this.chain_tip_sender.send(block_num) {
-                            error!("Failed to send chain tip: {:?}", err);
-                        }
-                    })
-                    .map_err(|err| {
-                        span.set_error(&err);
-                        let code = match err {
-                            ApplyBlockError::InvalidBlockError(_) => tonic::Code::InvalidArgument,
-                            _ => tonic::Code::Internal,
-                        };
-                        Status::new(code, err.as_report())
-                    })
-            }
-            .in_current_span(),
-        )
-        .await
-        .map_err(|err| {
-            tonic::Status::internal(err.as_report_context("joining apply_block task failed"))
-        })
-        .flatten()?;
+        let block_num = header.block_num();
+        let signed_block = SignedBlock::new(header, body, signature)
+            .map_err(|err| Status::new(tonic::Code::Internal, err.as_report()))?;
+
+        // Apply the block.
+        self.state
+            .apply_block(signed_block, Some(proving_inputs))
+            .await
+            .inspect(|_| {
+                if let Err(err) = self.chain_tip_sender.send(block_num) {
+                    error!("Failed to send chain tip: {:?}", err);
+                }
+            })
+            .map_err(|err| {
+                span.set_error(&err);
+                let code = match err {
+                    ApplyBlockError::InvalidBlockError(_) => tonic::Code::InvalidArgument,
+                    _ => tonic::Code::Internal,
+                };
+                Status::new(code, err.as_report())
+            })?;
+
         Ok(Response::new(()))
     }
 

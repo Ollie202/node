@@ -1,13 +1,21 @@
-//! Abstraction to synchronize state modifications.
+//! Lock-free state management for the Miden store.
 //!
-//! The [State] provides data access and modifications methods, its main purpose is to ensure that
-//! data is atomically written, and that reads are consistent.
+//! The [State] provides data access and modification methods. Reads are lock-free: readers access
+//! shared in-memory structures directly via [`WriterGuard`]. A single writer task, serialized by
+//! a channel, applies block mutations and then atomically advances a block counter
+//! ([`committed_block_num`](State::committed_block_num)) to publish the new state to readers.
+//!
+//! The `Release`/`Acquire` ordering on the atomic counter establishes a happens-before
+//! relationship, guaranteeing that readers who observe a given block number will see all
+//! mutations up to and including that block.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use miden_node_proto::BlockProofRequest;
 use miden_node_proto::domain::account::{
     AccountDetailRequest,
     AccountDetails,
@@ -29,12 +37,12 @@ use miden_protocol::account::{AccountId, StorageMapKey, StorageMapWitness, Stora
 use miden_protocol::asset::{AssetVaultKey, AssetWitness};
 use miden_protocol::block::account_tree::AccountWitness;
 use miden_protocol::block::nullifier_tree::{NullifierTree, NullifierWitness};
-use miden_protocol::block::{BlockHeader, BlockInputs, BlockNumber, Blockchain};
+use miden_protocol::block::{BlockHeader, BlockInputs, BlockNumber, Blockchain, SignedBlock};
 use miden_protocol::crypto::merkle::mmr::{MmrPeaks, MmrProof, PartialMmr};
-use miden_protocol::crypto::merkle::smt::{LargeSmt, SmtProof, SmtStorage};
+use miden_protocol::crypto::merkle::smt::{LargeSmt, SmtProof};
 use miden_protocol::note::{NoteId, NoteScript, Nullifier};
 use miden_protocol::transaction::PartialBlockchain;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info, instrument};
 
 use crate::account_state_forest::{AccountStateForest, WitnessError};
@@ -67,8 +75,11 @@ use loader::{
     verify_tree_consistency,
 };
 
-mod apply_block;
 mod sync_state;
+pub(crate) mod writer;
+mod writer_guard;
+
+pub(crate) use writer_guard::WriterGuard;
 
 // FINALITY
 // ================================================================================================
@@ -93,51 +104,44 @@ pub struct TransactionInputs {
     pub new_account_id_prefix_is_unique: Option<bool>,
 }
 
-/// Container for state that needs to be updated atomically.
-struct InnerState<S>
-where
-    S: SmtStorage,
-{
-    nullifier_tree: NullifierTree<LargeSmt<S>>,
-    blockchain: Blockchain,
-    account_tree: AccountTreeWithHistory<S>,
-}
-
-impl<S: SmtStorage> InnerState<S> {
-    /// Returns the latest block number.
-    fn latest_block_num(&self) -> BlockNumber {
-        self.blockchain
-            .chain_tip()
-            .expect("chain should always have at least the genesis block")
-    }
-}
-
 // CHAIN STATE
 // ================================================================================================
 
 /// The rollup state.
+///
+/// All in-memory state is accessed lock-free. A single writer task (serialized by a channel)
+/// mutates the state and then advances [`committed_block_num`](Self::committed_block_num) with
+/// `Release` ordering. Readers load the counter with `Acquire` ordering before accessing shared
+/// structures, guaranteeing they see a consistent snapshot.
 pub struct State {
     /// The database which stores block headers, nullifiers, notes, and the latest states of
     /// accounts.
-    db: Arc<Db>,
+    pub(crate) db: Arc<Db>,
 
     /// The block store which stores full block contents for all blocks.
-    block_store: Arc<BlockStore>,
+    pub(crate) block_store: Arc<BlockStore>,
 
-    /// Read-write lock used to prevent writing to a structure while it is being used.
-    ///
-    /// The lock is writer-preferring, meaning the writer won't be starved.
-    inner: RwLock<InnerState<TreeStorage>>,
+    /// Atomic block counter — the version pointer for readers.
+    /// Advanced by the writer AFTER all in-memory mutations are complete.
+    pub(crate) committed_block_num: AtomicU32,
 
-    /// Forest-related state `(SmtForest, storage_map_roots, vault_roots)` with its own lock.
-    forest: RwLock<AccountStateForest>,
+    /// Nullifier tree — append-only, backed by `RocksDB`.
+    pub(crate) nullifier_tree: WriterGuard<NullifierTree<LargeSmt<TreeStorage>>>,
 
-    /// To allow readers to access the tree data while an update in being performed, and prevent
-    /// TOCTOU issues, there must be no concurrent writers. This locks to serialize the writers.
-    writer: Mutex<()>,
+    /// Account tree with historical overlay support (50-block history).
+    pub(crate) account_tree: WriterGuard<AccountTreeWithHistory<TreeStorage>>,
+
+    /// Chain MMR (Merkle Mountain Range of block commitments).
+    pub(crate) blockchain: WriterGuard<Blockchain>,
+
+    /// Forest state for account storage maps and vault witnesses.
+    pub(crate) forest: WriterGuard<AccountStateForest>,
+
+    /// Channel to the single writer task.
+    writer_tx: mpsc::Sender<writer::WriteRequest>,
 
     /// Request termination of the process due to a fatal internal state error.
-    termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
+    pub(crate) termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
 
     /// The latest proven-in-sequence block number, updated by the proof scheduler.
     proven_tip: ProvenTipReader,
@@ -148,12 +152,16 @@ impl State {
     // --------------------------------------------------------------------------------------------
 
     /// Loads the state from the data directory.
+    ///
+    /// The returned `Arc<State>` is ready to use. The writer task is spawned internally and
+    /// holds a clone of the `Arc`. Dropping all external clones and closing the writer channel
+    /// will terminate the writer task.
     #[instrument(target = COMPONENT, skip_all)]
     pub async fn load(
         data_path: &Path,
         storage_options: StorageOptions,
         termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
-    ) -> Result<(Self, ProvenTipWriter), StateInitializationError> {
+    ) -> Result<(Arc<Self>, ProvenTipWriter), StateInitializationError> {
         let data_directory = DataDirectory::load(data_path.to_path_buf())
             .map_err(StateInitializationError::DataDirectoryLoadError)?;
 
@@ -185,18 +193,12 @@ impl State {
         let nullifier_tree = nullifier_storage.load_nullifier_tree(&mut db).await?;
 
         // Verify that tree roots match the expected roots from the database.
-        // This catches any divergence between persistent storage and the database caused by
-        // corruption or incomplete shutdown.
         verify_tree_consistency(account_tree.root(), nullifier_tree.root(), &mut db).await?;
 
         let account_tree = AccountTreeWithHistory::new(account_tree, latest_block_num);
 
         let forest = load_smt_forest(&mut db, latest_block_num).await?;
 
-        let inner = RwLock::new(InnerState { nullifier_tree, blockchain, account_tree });
-
-        let forest = RwLock::new(forest);
-        let writer = Mutex::new(());
         let db = Arc::new(db);
 
         // Initialize the proven tip from database.
@@ -204,18 +206,27 @@ impl State {
             db.proven_chain_tip().await.map_err(StateInitializationError::DatabaseError)?;
         let (proven_tip_writer, proven_tip) = ProvenTipWriter::new(proven_tip);
 
-        Ok((
-            Self {
-                db,
-                block_store,
-                inner,
-                forest,
-                writer,
-                termination_ask,
-                proven_tip,
-            },
-            proven_tip_writer,
-        ))
+        // Create the writer channel. Buffer size of 1: only one block can be in flight.
+        let (writer_tx, writer_rx) = mpsc::channel(1); // TODO(currentpr): Probably want some buffering.
+
+        let state = Arc::new(Self {
+            db,
+            block_store,
+            committed_block_num: AtomicU32::new(latest_block_num.as_u32()),
+            nullifier_tree: WriterGuard::new(nullifier_tree),
+            account_tree: WriterGuard::new(account_tree),
+            blockchain: WriterGuard::new(blockchain),
+            forest: WriterGuard::new(forest),
+            writer_tx,
+            termination_ask,
+            proven_tip,
+        });
+
+        // Spawn the single writer task.
+        let writer_state = Arc::clone(&state);
+        tokio::spawn(writer::writer_loop(writer_rx, writer_state));
+
+        Ok((state, proven_tip_writer))
     }
 
     /// Returns the database.
@@ -228,8 +239,48 @@ impl State {
         Arc::clone(&self.block_store)
     }
 
-    // STATE ACCESSORS
+    // BLOCK APPLICATION
     // --------------------------------------------------------------------------------------------
+
+    /// Apply changes of a new block to the DB and in-memory data structures.
+    ///
+    /// This sends the block to the single writer task via a channel and awaits the result.
+    /// The writer task handles all validation, DB writes, and in-memory mutations.
+    #[instrument(target = COMPONENT, skip_all, err, fields(block.number = signed_block.header().block_num().as_u32()))]
+    pub async fn apply_block(
+        &self,
+        signed_block: SignedBlock,
+        proving_inputs: Option<BlockProofRequest>,
+    ) -> Result<(), ApplyBlockError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.writer_tx
+            .send(writer::WriteRequest { signed_block, proving_inputs, result_tx })
+            .await
+            .map_err(|e| ApplyBlockError::WriterTaskSendFailed(Box::new(e)))?;
+        result_rx.await?
+    }
+
+    // STATE ACCESSORS (lock-free)
+    // --------------------------------------------------------------------------------------------
+
+    /// Returns the committed block number (atomic load with Acquire ordering).
+    fn committed_block_num(&self) -> BlockNumber {
+        BlockNumber::from(self.committed_block_num.load(Ordering::Acquire))
+    }
+
+    /// Returns the effective chain tip for the given finality level.
+    ///
+    /// - [`Finality::Committed`]: returns the latest committed block number from the atomic
+    ///   counter.
+    /// - [`Finality::Proven`]: returns the latest proven-in-sequence block number (cached via watch
+    ///   channel, updated by the proof scheduler).
+    #[expect(clippy::unused_async)]
+    pub async fn chain_tip(&self, finality: Finality) -> BlockNumber {
+        match finality {
+            Finality::Committed => self.committed_block_num(),
+            Finality::Proven => self.proven_tip.read(),
+        }
+    }
 
     /// Queries a [BlockHeader] from the database, and returns it alongside its inclusion proof.
     ///
@@ -244,8 +295,7 @@ impl State {
         let block_header = self.db.select_block_header_by_block_num(block_num).await?;
         if let Some(header) = block_header {
             let mmr_proof = if include_mmr_proof {
-                let inner = self.inner.read().await;
-                let mmr_proof = inner.blockchain.open(header.block_num())?;
+                let mmr_proof = self.blockchain.as_ref().open(header.block_num())?;
                 Some(mmr_proof)
             } else {
                 None
@@ -262,10 +312,10 @@ impl State {
     /// Note: these proofs are invalidated once the nullifier tree is modified, i.e. on a new block.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret)]
     pub async fn check_nullifiers(&self, nullifiers: &[Nullifier]) -> Vec<SmtProof> {
-        let inner = self.inner.read().await;
+        let tree = self.nullifier_tree.as_ref();
         nullifiers
             .iter()
-            .map(|n| inner.nullifier_tree.open(n))
+            .map(|n| tree.open(n))
             .map(NullifierWitness::into_proof)
             .collect()
     }
@@ -287,7 +337,7 @@ impl State {
         &self,
         block_num: Option<BlockNumber>,
     ) -> Result<Option<(BlockHeader, MmrPeaks)>, GetCurrentBlockchainDataError> {
-        let blockchain = &self.inner.read().await.blockchain;
+        let blockchain = self.blockchain.as_ref();
         if let Some(number) = block_num
             && number == self.chain_tip(Finality::Committed).await
         {
@@ -354,41 +404,33 @@ impl State {
         let mut blocks: BTreeSet<BlockNumber> = tx_reference_blocks;
         blocks.extend(note_blocks);
 
-        // Scoped block to automatically drop the read lock guard as soon as we're done.
-        // We also avoid accessing the db in the block as this would delay dropping the guard.
-        let (batch_reference_block, partial_mmr) = {
-            let inner_state = self.inner.read().await;
+        let blockchain = self.blockchain.as_ref();
+        let latest_block_num = self.committed_block_num();
 
-            let latest_block_num = inner_state.latest_block_num();
+        let highest_block_num =
+            *blocks.last().expect("we should have checked for empty block references");
+        if highest_block_num > latest_block_num {
+            return Err(GetBatchInputsError::UnknownTransactionBlockReference {
+                highest_block_num,
+                latest_block_num,
+            });
+        }
 
-            let highest_block_num =
-                *blocks.last().expect("we should have checked for empty block references");
-            if highest_block_num > latest_block_num {
-                return Err(GetBatchInputsError::UnknownTransactionBlockReference {
-                    highest_block_num,
-                    latest_block_num,
-                });
-            }
+        // Remove the latest block from the to-be-tracked blocks as it will be the reference
+        // block for the batch itself and thus added to the MMR within the batch kernel, so
+        // there is no need to prove its inclusion.
+        blocks.remove(&latest_block_num);
 
-            // Remove the latest block from the to-be-tracked blocks as it will be the reference
-            // block for the batch itself and thus added to the MMR within the batch kernel, so
-            // there is no need to prove its inclusion.
-            blocks.remove(&latest_block_num);
+        // SAFETY:
+        // - The latest block num was retrieved from the committed counter and the blockchain is
+        //   guaranteed to have been updated to at least that block (happens-before).
+        // - We have checked that no block number in the blocks set is greater than latest block
+        //   number *and* latest block num was removed from the set.
+        let partial_mmr = blockchain.partial_mmr_from_blocks(&blocks, latest_block_num).expect(
+            "latest block num should exist and all blocks in set should be < than latest block",
+        );
 
-            // SAFETY:
-            // - The latest block num was retrieved from the inner blockchain from which we will
-            //   also retrieve the proofs, so it is guaranteed to exist in that chain.
-            // - We have checked that no block number in the blocks set is greater than latest block
-            //   number *and* latest block num was removed from the set. Therefore only block
-            //   numbers smaller than latest block num remain in the set. Therefore all the block
-            //   numbers are guaranteed to exist in the chain state at latest block num.
-            let partial_mmr = inner_state
-                .blockchain
-                .partial_mmr_from_blocks(&blocks, latest_block_num)
-                .expect("latest block num should exist and all blocks in set should be < than latest block");
-
-            (latest_block_num, partial_mmr)
-        };
+        let batch_reference_block = latest_block_num;
 
         // Fetch the reference block of the batch as part of this query, so we can avoid looking it
         // up in a separate DB access.
@@ -437,8 +479,6 @@ impl State {
         reference_blocks: BTreeSet<BlockNumber>,
     ) -> Result<BlockInputs, GetBlockInputsError> {
         // Get the note inclusion proofs from the DB.
-        // We do this first so we have to acquire the lock to the state just once. There we need the
-        // reference blocks of the note proofs to get their authentication paths in the chain MMR.
         let unauthenticated_note_proofs = self
             .db
             .select_note_inclusion_proofs(unauthenticated_note_commitments)
@@ -454,7 +494,7 @@ impl State {
         blocks.extend(note_proof_reference_blocks);
 
         let (latest_block_number, account_witnesses, nullifier_witnesses, partial_mmr) =
-            self.get_block_inputs_witnesses(&mut blocks, account_ids, nullifiers).await?;
+            self.get_block_inputs_witnesses(&mut blocks, &account_ids, &nullifiers)?;
 
         // Fetch the block headers for all blocks in the partial MMR plus the latest one which will
         // be used as the previous block header of the block being built.
@@ -477,14 +517,6 @@ impl State {
         // The order doesn't matter for PartialBlockchain::new, so swap remove is fine.
         let latest_block_header = headers.swap_remove(latest_block_header_index);
 
-        // SAFETY: This should not error because:
-        // - we're passing exactly the block headers that we've added to the partial MMR,
-        // - so none of the block header's block numbers should exceed the chain length of the
-        //   partial MMR,
-        // - and we've added blocks to a BTreeSet, so there can be no duplicates.
-        //
-        // We construct headers and partial MMR in concert, so they are consistent. This is why we
-        // can call the unchecked constructor.
         let partial_block_chain = PartialBlockchain::new_unchecked(partial_mmr, headers)
             .expect("partial mmr and block headers should be consistent");
 
@@ -497,17 +529,15 @@ impl State {
         ))
     }
 
-    /// Get account and nullifier witnesses for the requested account IDs and nullifier as well as
+    /// Get account and nullifier witnesses for the requested account IDs and nullifiers as well as
     /// the [`PartialMmr`] for the given blocks. The MMR won't contain the latest block and its
     /// number is removed from `blocks` and returned separately.
-    ///
-    /// This method acquires the lock to the inner state and does not access the DB so we release
-    /// the lock asap.
-    async fn get_block_inputs_witnesses(
+    #[expect(clippy::type_complexity)]
+    fn get_block_inputs_witnesses(
         &self,
         blocks: &mut BTreeSet<BlockNumber>,
-        account_ids: Vec<AccountId>,
-        nullifiers: Vec<Nullifier>,
+        account_ids: &[AccountId],
+        nullifiers: &[Nullifier],
     ) -> Result<
         (
             BlockNumber,
@@ -517,9 +547,11 @@ impl State {
         ),
         GetBlockInputsError,
     > {
-        let inner = self.inner.read().await;
+        let blockchain = self.blockchain.as_ref();
+        let account_tree = self.account_tree.as_ref();
+        let nullifier_tree = self.nullifier_tree.as_ref();
 
-        let latest_block_number = inner.latest_block_num();
+        let latest_block_number = self.committed_block_num();
 
         // If `blocks` is empty, use the latest block number which will never trigger the error.
         let highest_block_number = blocks.last().copied().unwrap_or(latest_block_number);
@@ -534,26 +566,15 @@ impl State {
         // inclusion in the chain.
         blocks.remove(&latest_block_number);
 
-        // Fetch the partial MMR at the state of the latest block with authentication paths for the
-        // provided set of blocks.
-        //
-        // SAFETY:
-        // - The latest block num was retrieved from the inner blockchain from which we will also
-        //   retrieve the proofs, so it is guaranteed to exist in that chain.
-        // - We have checked that no block number in the blocks set is greater than latest block
-        //   number *and* latest block num was removed from the set. Therefore only block numbers
-        //   smaller than latest block num remain in the set. Therefore all the block numbers are
-        //   guaranteed to exist in the chain state at latest block num.
-        let partial_mmr =
-            inner.blockchain.partial_mmr_from_blocks(blocks, latest_block_number).expect(
-                "latest block num should exist and all blocks in set should be < than latest block",
-            );
+        let partial_mmr = blockchain.partial_mmr_from_blocks(blocks, latest_block_number).expect(
+            "latest block num should exist and all blocks in set should be < than latest block",
+        );
 
         // Fetch witnesses for all accounts.
         let account_witnesses = account_ids
             .iter()
             .copied()
-            .map(|account_id| (account_id, inner.account_tree.open_latest(account_id)))
+            .map(|account_id| (account_id, account_tree.open_latest(account_id)))
             .collect::<BTreeMap<AccountId, AccountWitness>>();
 
         // Fetch witnesses for all nullifiers. We don't check whether the nullifiers are spent or
@@ -561,7 +582,7 @@ impl State {
         let nullifier_witnesses: BTreeMap<Nullifier, NullifierWitness> = nullifiers
             .iter()
             .copied()
-            .map(|nullifier| (nullifier, inner.nullifier_tree.open(&nullifier)))
+            .map(|nullifier| (nullifier, nullifier_tree.open(&nullifier)))
             .collect();
 
         Ok((latest_block_number, account_witnesses, nullifier_witnesses, partial_mmr))
@@ -577,12 +598,13 @@ impl State {
     ) -> Result<TransactionInputs, DatabaseError> {
         info!(target: COMPONENT, account_id = %account_id.to_string(), nullifiers = %format_array(nullifiers));
 
-        let inner = self.inner.read().await;
+        let account_tree = self.account_tree.as_ref();
+        let nullifier_tree = self.nullifier_tree.as_ref();
 
-        let account_commitment = inner.account_tree.get_latest_commitment(account_id);
+        let account_commitment = account_tree.get_latest_commitment(account_id);
 
         let new_account_id_prefix_is_unique = if account_commitment.is_empty() {
-            Some(!inner.account_tree.contains_account_id_prefix_in_latest(account_id.prefix()))
+            Some(!account_tree.contains_account_id_prefix_in_latest(account_id.prefix()))
         } else {
             None
         };
@@ -599,7 +621,7 @@ impl State {
             .iter()
             .map(|nullifier| NullifierInfo {
                 nullifier: *nullifier,
-                block_num: inner.nullifier_tree.get_block_num(nullifier).unwrap_or_default(),
+                block_num: nullifier_tree.get_block_num(nullifier).unwrap_or_default(),
             })
             .collect();
 
@@ -631,12 +653,6 @@ impl State {
 
     /// Returns network account IDs within the specified block range (based on account creation
     /// block).
-    ///
-    /// The function may return fewer accounts than exist in the range if the result would exceed
-    /// `MAX_RESPONSE_PAYLOAD_BYTES / AccountId::SERIALIZED_SIZE` rows. In this case, the result is
-    /// truncated at a block boundary to ensure all accounts from included blocks are returned.
-    ///
-    /// The response includes the last block number that was fully included in the result.
     pub async fn get_all_network_accounts(
         &self,
         block_range: RangeInclusive<BlockNumber>,
@@ -663,7 +679,7 @@ impl State {
             return Err(GetAccountError::AccountNotPublic(account_id));
         }
 
-        let (block_num, witness) = self.get_account_witness(block_num, account_id).await?;
+        let (block_num, witness) = self.get_account_witness(block_num, account_id)?;
 
         let details = if let Some(request) = details {
             Some(self.fetch_public_account_details(account_id, block_num, request).await?)
@@ -678,30 +694,29 @@ impl State {
     ///
     /// If `block_num` is provided, returns the witness at that historical block;
     /// otherwise, returns the witness at the latest block.
-    async fn get_account_witness(
+    fn get_account_witness(
         &self,
         block_num: Option<BlockNumber>,
         account_id: AccountId,
     ) -> Result<(BlockNumber, AccountWitness), GetAccountError> {
-        let inner_state = self.inner.read().await;
+        let account_tree = self.account_tree.as_ref();
 
         // Determine which block to query
         let (block_num, witness) = if let Some(requested_block) = block_num {
             // Historical query: use the account tree with history
-            let witness =
-                inner_state.account_tree.open_at(account_id, requested_block).ok_or_else(|| {
-                    let latest_block = inner_state.account_tree.block_number_latest();
-                    if requested_block > latest_block {
-                        GetAccountError::UnknownBlock(requested_block)
-                    } else {
-                        GetAccountError::BlockPruned(requested_block)
-                    }
-                })?;
+            let witness = account_tree.open_at(account_id, requested_block).ok_or_else(|| {
+                let latest_block = account_tree.block_number_latest();
+                if requested_block > latest_block {
+                    GetAccountError::UnknownBlock(requested_block)
+                } else {
+                    GetAccountError::BlockPruned(requested_block)
+                }
+            })?;
             (requested_block, witness)
         } else {
             // Latest query: use the latest state
-            let block_num = inner_state.account_tree.block_number_latest();
-            let witness = inner_state.account_tree.open_latest(account_id);
+            let block_num = account_tree.block_number_latest();
+            let witness = account_tree.open_latest(account_id);
             (block_num, witness)
         };
 
@@ -734,14 +749,10 @@ impl State {
             return Err(GetAccountError::AccountNotPublic(account_id));
         }
 
-        // Validate block exists in the blockchain before querying the database
-        {
-            let inner = self.inner.read().await;
-            let latest_block_num = inner.latest_block_num();
-
-            if block_num > latest_block_num {
-                return Err(GetAccountError::UnknownBlock(block_num));
-            }
+        // Validate block exists in the blockchain before querying the database.
+        let latest_block_num = self.committed_block_num();
+        if block_num > latest_block_num {
+            return Err(GetAccountError::UnknownBlock(block_num));
         }
 
         // Query account header and storage header together in a single DB call
@@ -796,9 +807,9 @@ impl State {
         let mut storage_map_details_by_index = vec![None; storage_request_slots.len()];
 
         if !map_keys_requests.is_empty() {
-            let forest_guard = self.forest.read().await;
+            let forest = self.forest.as_ref();
             for (index, slot_name, keys) in map_keys_requests {
-                let details = forest_guard
+                let details = forest
                     .get_storage_map_details_for_keys(
                         account_id,
                         slot_name.clone(),
@@ -856,18 +867,6 @@ impl State {
         })
     }
 
-    /// Returns the effective chain tip for the given finality level.
-    ///
-    /// - [`Finality::Committed`]: returns the latest committed block number (from in-memory MMR).
-    /// - [`Finality::Proven`]: returns the latest proven-in-sequence block number (cached via watch
-    ///   channel, updated by the proof scheduler).
-    pub async fn chain_tip(&self, finality: Finality) -> BlockNumber {
-        match finality {
-            Finality::Committed => self.inner.read().await.latest_block_num(),
-            Finality::Proven => self.proven_tip.read(),
-        }
-    }
-
     /// Loads a block from the block store. Return `Ok(None)` if the block is not found.
     pub async fn load_block(
         &self,
@@ -915,6 +914,7 @@ impl State {
     }
 
     /// Returns vault asset witnesses for the specified account and block number.
+    #[expect(clippy::unused_async)]
     pub async fn get_vault_asset_witnesses(
         &self,
         account_id: AccountId,
@@ -923,8 +923,7 @@ impl State {
     ) -> Result<Vec<AssetWitness>, WitnessError> {
         let witnesses = self
             .forest
-            .read()
-            .await
+            .as_ref()
             .get_vault_asset_witnesses(account_id, block_num, vault_keys)?;
         Ok(witnesses)
     }
@@ -934,6 +933,7 @@ impl State {
     ///
     /// Note that the `raw_key` is the raw, user-provided key that needs to be hashed in order to
     /// get the actual key into the storage map.
+    #[expect(clippy::unused_async)]
     pub async fn get_storage_map_witness(
         &self,
         account_id: AccountId,
@@ -943,8 +943,7 @@ impl State {
     ) -> Result<StorageMapWitness, WitnessError> {
         let witness = self
             .forest
-            .read()
-            .await
+            .as_ref()
             .get_storage_map_witness(account_id, slot_name, block_num, raw_key)?;
         Ok(witness)
     }

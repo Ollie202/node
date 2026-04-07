@@ -78,10 +78,8 @@ impl State {
         let to_forest = block_to.as_usize();
 
         let mmr_delta = self
-            .inner
-            .read()
-            .await
             .blockchain
+            .as_ref()
             .as_mmr()
             .get_delta(Forest::new(from_forest), Forest::new(to_forest))
             .map_err(StateSyncError::FailedToBuildMmrDelta)?;
@@ -129,8 +127,7 @@ impl State {
             // SAFETY: it is ensured that block_end <= chain_tip, and the blockchain MMR always has
             // at least chain_tip + 1 leaves.
             let mmr_checkpoint = block_end + 1;
-            let mmr_proof =
-                self.inner.read().await.blockchain.open_at(block_num, mmr_checkpoint)?;
+            let mmr_proof = self.blockchain.as_ref().open_at(block_num, mmr_checkpoint)?;
             results.push((note_sync, mmr_proof));
 
             current_from = block_num + 1;

@@ -201,14 +201,16 @@ pub enum ApplyBlockError {
 
     // OTHER ERRORS
     // ---------------------------------------------------------------------------------------------
-    #[error("block applying was cancelled because of closed channel on database side")]
-    ClosedChannel(#[from] RecvError),
-    #[error("concurrent write detected")]
-    ConcurrentWrite,
     #[error("database doesn't have any block header data")]
     DbBlockHeaderEmpty,
     #[error("database update failed: {0}")]
     DbUpdateTaskFailed(String),
+    #[error("failed to send block to writer task (channel closed)")]
+    WriterTaskSendFailed(
+        #[source] Box<tokio::sync::mpsc::error::SendError<crate::state::writer::WriteRequest>>,
+    ),
+    #[error("writer task dropped the result channel")]
+    WriterTaskRecvFailed(#[from] tokio::sync::oneshot::error::RecvError),
 }
 
 impl From<ApplyBlockError> for Status {

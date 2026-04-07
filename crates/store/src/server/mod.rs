@@ -176,14 +176,13 @@ impl Store {
 
     /// Spawns the gRPC servers and the DB maintenance background task.
     fn spawn_grpc_servers(
-        state: State,
+        state: Arc<State>,
         chain_tip_sender: watch::Sender<miden_protocol::block::BlockNumber>,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
         ntx_builder_listener: TcpListener,
         block_producer_listener: TcpListener,
     ) -> anyhow::Result<JoinSet<Result<(), tonic::transport::Error>>> {
-        let state = Arc::new(state);
         let rpc_service = store::rpc_server::RpcServer::new(api::StoreApi {
             state: Arc::clone(&state),
             chain_tip_sender: chain_tip_sender.clone(),
