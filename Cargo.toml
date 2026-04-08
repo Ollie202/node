@@ -144,5 +144,5 @@ should_panic_without_expect  = "allow" # We don't care about the specific panic 
 files.extend-exclude = ["*.svg"] # Ignore SVG files.
 
 [patch.crates-io]
-miden-crypto = { git = "https://github.com/0xmiden/crypto", branch = "sergerad-clone" }
-miden-serde-utils = { git = "https://github.com/0xmiden/crypto", branch = "sergerad-clone" }
+miden-crypto      = { branch = "sergerad-clone", git = "https://github.com/0xmiden/crypto" }
+miden-serde-utils = { branch = "sergerad-clone", git = "https://github.com/0xmiden/crypto" }

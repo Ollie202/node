@@ -573,6 +573,7 @@ impl State {
     /// Get account and nullifier witnesses for the requested account IDs and nullifiers as well as
     /// the [`PartialMmr`] for the given blocks. The MMR won't contain the latest block and its
     /// number is removed from `blocks` and returned separately.
+    #[expect(clippy::type_complexity)]
     fn get_block_inputs_witnesses(
         &self,
         blocks: &mut BTreeSet<BlockNumber>,

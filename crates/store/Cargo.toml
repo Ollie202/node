@@ -15,8 +15,8 @@ version.workspace      = true
 workspace = true
 
 [dependencies]
-arc-swap                        = "1"
 anyhow                          = { workspace = true }
+arc-swap                        = "1"
 deadpool                        = { default-features = false, features = ["managed", "rt_tokio_1"], version = "0.12" }
 deadpool-diesel                 = { features = ["sqlite"], version = "0.6" }
 diesel                          = { features = ["numeric", "sqlite"], version = "2.3" }
