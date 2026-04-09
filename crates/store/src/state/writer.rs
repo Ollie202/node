@@ -39,8 +39,8 @@ pub(crate) async fn writer_loop(mut rx: mpsc::Receiver<WriteRequest>, state: Arc
 /// This function is the sole writer to all in-memory state. The nullifier tree (backed by
 /// `RocksDB` with MVCC) is accessed lock-free via [`WriterGuard`]. The in-memory structures
 /// (`account_tree`, `blockchain`, `forest`) are held in an `Arc<InMemoryState>` behind an
-/// `ArcSwap`. The writer loads the current state, validates against it, commits to DB (no locks
-/// held), then deep-clones the state, applies mutations, and atomically swaps the pointer.
+/// `ArcSwap`. The writer loads the current state, validates against it, commits to DB, then
+/// deep-clones the state, applies mutations, and atomically swaps the pointer.
 ///
 /// Readers never block: they obtain an `Arc` via `ArcSwap::load_full()`, which performs only an
 /// atomic refcount increment with no data cloning. The atomic swap guarantees readers see either
@@ -102,7 +102,7 @@ async fn apply_block_inner(
         async move { store.save_block(block_num, &signed_block_bytes).await }.in_current_span(),
     );
 
-    // Load the current in-memory state snapshot for validation (wait-free, no locks).
+    // Load the current in-memory state snapshot for validation (wait-free).
     let snapshot = state.in_memory.load_full();
 
     // Compute mutations required for updating account and nullifier trees.
@@ -212,8 +212,8 @@ async fn apply_block_inner(
             },
         ));
 
-    // Commit to DB. No locks are held — this is the key advantage over the previous design.
-    // Readers continue to see the old in-memory state (via their Arc) while the DB commits.
+    // Commit to DB. Readers continue to see the old in-memory state (via their Arc) while
+    // the DB commits.
     state
         .db
         .apply_block(signed_block, notes, proving_inputs)
