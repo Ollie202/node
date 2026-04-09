@@ -588,33 +588,41 @@ impl State {
         ),
         GetBlockInputsError,
     > {
-        let snapshot = self.snapshot();
-        let latest_block_number = snapshot.block_num;
+        // Take a snapshot and extract everything we need, then drop it so readers of newer
+        // snapshots aren't held up by this Arc.
+        let (latest_block_number, partial_mmr, account_witnesses) = {
+            let snapshot = self.snapshot();
+            let latest_block_number = snapshot.block_num;
 
-        // If `blocks` is empty, use the latest block number which will never trigger the error.
-        let highest_block_number = blocks.last().copied().unwrap_or(latest_block_number);
-        if highest_block_number > latest_block_number {
-            return Err(GetBlockInputsError::UnknownBatchBlockReference {
-                highest_block_number,
-                latest_block_number,
-            });
-        }
+            // If `blocks` is empty, use the latest block number which will never trigger the error.
+            let highest_block_number = blocks.last().copied().unwrap_or(latest_block_number);
+            if highest_block_number > latest_block_number {
+                return Err(GetBlockInputsError::UnknownBatchBlockReference {
+                    highest_block_number,
+                    latest_block_number,
+                });
+            }
 
-        // The latest block is not yet in the chain MMR, so we can't (and don't need to) prove its
-        // inclusion in the chain.
-        blocks.remove(&latest_block_number);
+            // The latest block is not yet in the chain MMR, so we can't (and don't need to) prove
+            // its inclusion in the chain.
+            blocks.remove(&latest_block_number);
 
-        let partial_mmr =
-            snapshot.blockchain.partial_mmr_from_blocks(blocks, latest_block_number).expect(
-                "latest block num should exist and all blocks in set should be < than latest block",
-            );
+            let partial_mmr = snapshot
+                .blockchain
+                .partial_mmr_from_blocks(blocks, latest_block_number)
+                .expect(
+                    "latest block num should exist and all blocks in set should be < than latest block",
+                );
 
-        // Fetch witnesses for all accounts.
-        let account_witnesses = account_ids
-            .iter()
-            .copied()
-            .map(|account_id| (account_id, snapshot.account_tree.open_latest(account_id)))
-            .collect::<BTreeMap<AccountId, AccountWitness>>();
+            // Fetch witnesses for all accounts.
+            let account_witnesses = account_ids
+                .iter()
+                .copied()
+                .map(|account_id| (account_id, snapshot.account_tree.open_latest(account_id)))
+                .collect::<BTreeMap<AccountId, AccountWitness>>();
+
+            (latest_block_number, partial_mmr, account_witnesses)
+        };
 
         // Fetch witnesses for all nullifiers. We don't check whether the nullifiers are spent or
         // not as this is done as part of proposing the block.
@@ -638,6 +646,8 @@ impl State {
     ) -> Result<TransactionInputs, DatabaseError> {
         info!(target: COMPONENT, account_id = %account_id.to_string(), nullifiers = %format_array(nullifiers));
 
+        // Take a snapshot and extract everything we need, then drop it so readers of newer
+        // snapshots aren't held up by this Arc.
         let (new_account_id_prefix_is_unique, account_commitment) = {
             let snapshot = self.snapshot();
 
