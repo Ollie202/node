@@ -20,8 +20,7 @@ use crate::status::{NetworkStatus, ServiceDetails, ServiceStatus};
 /// A pair of watch receivers for a remote prover: one for status checks and an optional one for
 /// test results (only present if the prover supports transaction proofs and was reachable at
 /// startup).
-pub type ProverReceivers =
-    (watch::Receiver<ServiceStatus>, Option<watch::Receiver<ServiceStatus>>);
+pub type ProverReceivers = (watch::Receiver<ServiceStatus>, Option<watch::Receiver<ServiceStatus>>);
 
 /// State for the web server containing watch receivers for all services.
 #[derive(Clone)]

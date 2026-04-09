@@ -26,7 +26,9 @@ use crate::faucet::run_faucet_test_task;
 use crate::frontend::{ServerState, serve};
 use crate::note_transport::{initial_note_transport_status, run_note_transport_status_task};
 use crate::remote_prover::{
-    ProofType, generate_prover_test_payload, run_deferred_prover_test_task,
+    ProofType,
+    generate_prover_test_payload,
+    run_deferred_prover_test_task,
     run_remote_prover_test_task,
 };
 use crate::status::{
@@ -269,7 +271,7 @@ impl Tasks {
     /// - If the prover is available but doesn't support transaction proofs, returns `None`.
     /// - If the prover is unavailable at startup, spawns a deferred test task that watches the
     ///   status channel and starts testing once the prover comes online.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn spawn_prover_test_task(
         &mut self,
         index: usize,
@@ -283,22 +285,20 @@ impl Tasks {
         // Extract proof_type from the initial status check.
         // If the prover is unavailable at startup, proof_type will be None and we spawn
         // a deferred test task that waits for the status task to discover the proof type.
-        let proof_type =
-            if let crate::status::ServiceDetails::RemoteProverStatus(details) =
-                &initial_status.details
-            {
-                Some(details.supported_proof_type.clone())
-            } else {
-                tracing::warn!("Prover {name} is not available during startup, deferring test task");
-                None
-            };
+        let proof_type = if let crate::status::ServiceDetails::RemoteProverStatus(details) =
+            &initial_status.details
+        {
+            Some(details.supported_proof_type.clone())
+        } else {
+            tracing::warn!("Prover {name} is not available during startup, deferring test task");
+            None
+        };
 
         match &proof_type {
             Some(ProofType::Transaction) => {
                 debug!("Starting transaction proof tests for prover: {}", name);
                 let payload = generate_prover_test_payload().await;
-                let (prover_test_tx, prover_test_rx) =
-                    watch::channel(initial_status.clone());
+                let (prover_test_tx, prover_test_rx) = watch::channel(initial_status.clone());
 
                 let prover_url = prover_url.clone();
                 let name = name.to_string();
@@ -334,8 +334,7 @@ impl Tasks {
                 // Prover is unavailable at startup: spawn a deferred test task that watches
                 // the status channel and starts testing once the prover comes online with
                 // transaction proof support.
-                let (prover_test_tx, prover_test_rx) =
-                    watch::channel(initial_status.clone());
+                let (prover_test_tx, prover_test_rx) = watch::channel(initial_status.clone());
                 let status_rx = status_rx.clone();
                 let prover_url = prover_url.clone();
                 let name = name.to_string();

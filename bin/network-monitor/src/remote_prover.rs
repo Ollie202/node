@@ -118,9 +118,7 @@ pub async fn run_deferred_prover_test_task(
     };
 
     if !matches!(proof_type, ProofType::Transaction) {
-        info!(
-            "Prover {name} supports {proof_type:?} proofs, not Transaction — skipping test task"
-        );
+        info!("Prover {name} supports {proof_type:?} proofs, not Transaction — skipping test task");
         return;
     }
 
