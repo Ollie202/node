@@ -419,6 +419,10 @@ message SyncAccountVaultRequest {
 
     // Account for which we want to sync asset vault.
     account.AccountId account_id = 2;
+
+    // If true, return at most one update per vault key with the latest known value in the
+    // requested range. If false, return all updates in the requested range.
+    bool latest_only = 3;
 }
 
 message SyncAccountVaultResponse {
@@ -427,8 +431,9 @@ message SyncAccountVaultResponse {
 
     // List of asset updates for the account.
     //
-    // Multiple updates can be returned for a single asset, and the one with a higher `block_num`
-    // is expected to be retained by the caller.
+    // When `latest_only` is false, multiple updates can be returned for a single asset, and the
+    // one with a higher `block_num` is expected to be retained by the caller. When `latest_only`
+    // is true, at most one update is returned for each vault key.
     repeated AccountVaultUpdate updates = 2;
 }
 
@@ -547,6 +552,10 @@ message SyncAccountStorageMapsRequest {
 
     // Account for which we want to sync storage maps.
     account.AccountId account_id = 3;
+
+    // If true, return at most one update per slot/key pair with the latest known value in the
+    // requested range. If false, return all updates in the requested range.
+    bool latest_only = 4;
 }
 
 message SyncAccountStorageMapsResponse {
@@ -555,8 +564,9 @@ message SyncAccountStorageMapsResponse {
 
     // The list of storage map updates.
     //
-    // Multiple updates can be returned for a single slot index and key combination, and the one
-    // with a higher `block_num` is expected to be retained by the caller.
+    // When `latest_only` is false, multiple updates can be returned for a single slot index and
+    // key combination, and the one with a higher `block_num` is expected to be retained by the
+    // caller. When `latest_only` is true, at most one update is returned for each slot/key pair.
     repeated StorageMapUpdate updates = 2;
 }
 

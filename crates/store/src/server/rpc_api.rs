@@ -290,10 +290,11 @@ impl rpc_server::Rpc for StoreApi {
             "SyncAccountVaultRequest",
         )?
         .into_inclusive_range::<SyncAccountVaultError>(&chain_tip)?;
+        let latest_only = request.latest_only;
 
         let (last_included_block, updates) = self
             .state
-            .sync_account_vault(account_id, block_range)
+            .sync_account_vault(account_id, block_range, latest_only)
             .await
             .map_err(SyncAccountVaultError::from)?;
 
@@ -342,10 +343,11 @@ impl rpc_server::Rpc for StoreApi {
             "SyncAccountStorageMapsRequest",
         )?
         .into_inclusive_range::<SyncAccountStorageMapsError>(&chain_tip)?;
+        let latest_only = request.latest_only;
 
         let storage_maps_page = self
             .state
-            .sync_account_storage_maps(account_id, block_range)
+            .sync_account_storage_maps(account_id, block_range, latest_only)
             .await
             .map_err(SyncAccountStorageMapsError::from)?;
 

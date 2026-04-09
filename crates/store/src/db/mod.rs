@@ -617,13 +617,15 @@ impl Db {
 
     /// Selects storage map values for syncing storage maps for a specific account ID.
     ///
-    /// The returned values are the latest known values up to `block_range.end()`, and no values
-    /// earlier than `block_range.start()` are returned.
+    /// If `latest_only` is true, the returned values contain at most one row per slot/key pair
+    /// using the latest known value up to `block_range.end()`. If `latest_only` is false, all
+    /// updates in the requested range are returned.
     pub(crate) async fn select_storage_map_sync_values(
         &self,
         account_id: AccountId,
         block_range: RangeInclusive<BlockNumber>,
         entries_limit: Option<usize>,
+        latest_only: bool,
     ) -> Result<StorageMapValuesPage> {
         let entries_limit = entries_limit.unwrap_or_else(default_storage_map_entries_limit);
 
@@ -633,6 +635,7 @@ impl Db {
                 account_id,
                 block_range,
                 entries_limit,
+                latest_only,
             )
         })
         .await
@@ -667,6 +670,7 @@ impl Db {
                 account_id,
                 block_range_start..=block_num,
                 Some(entries_limit),
+                false,
             )
             .await?;
 
@@ -691,6 +695,7 @@ impl Db {
                     account_id,
                     block_range_start..=block_num,
                     Some(entries_limit),
+                    false,
                 )
                 .await?;
 
@@ -790,9 +795,10 @@ impl Db {
         &self,
         account_id: AccountId,
         block_range: RangeInclusive<BlockNumber>,
+        latest_only: bool,
     ) -> Result<(BlockNumber, Vec<AccountVaultValue>)> {
         self.transact("account vault sync", move |conn| {
-            queries::select_account_vault_assets(conn, account_id, block_range)
+            queries::select_account_vault_assets(conn, account_id, block_range, latest_only)
         })
         .await
     }

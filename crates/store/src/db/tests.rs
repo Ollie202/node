@@ -551,6 +551,7 @@ fn sync_account_vault_basic_validation() {
         conn,
         public_account_id,
         invalid_block_from..=block_to,
+        false,
     );
     assert!(result.is_err(), "expected error for invalid block range");
 
@@ -560,7 +561,7 @@ fn sync_account_vault_basic_validation() {
 
     // Test with valid block range - should return vault assets
     let (last_block, values) =
-        queries::select_account_vault_assets(conn, public_account_id, block_from..=block_to)
+        queries::select_account_vault_assets(conn, public_account_id, block_from..=block_to, false)
             .unwrap();
 
     // Should return assets we inserted
@@ -572,6 +573,75 @@ fn sync_account_vault_basic_validation() {
         values.iter().find(|v| v.vault_key == vault_key_1 && v.block_num == block_to);
     assert!(vault_key_1_asset.is_some(), "should find updated vault asset");
     assert_eq!(vault_key_1_asset.unwrap().asset, Some(updated_fungible_asset_1));
+}
+
+#[test]
+#[miden_node_test_macro::enable_logging]
+fn sync_account_vault_returns_historical_or_latest_only() {
+    let mut conn = create_db();
+    let conn = &mut conn;
+
+    let account_id = AccountId::try_from(ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_IMMUTABLE_CODE).unwrap();
+    let faucet_id = AccountId::try_from(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET).unwrap();
+    let block_1: BlockNumber = 1.into();
+    let block_2: BlockNumber = 2.into();
+    let block_3: BlockNumber = 3.into();
+
+    create_block(conn, block_1);
+    create_block(conn, block_2);
+    create_block(conn, block_3);
+
+    for block in [block_1, block_2, block_3] {
+        queries::upsert_accounts(conn, &[mock_block_account_update(account_id, 0)], block).unwrap();
+    }
+
+    let asset_1: Asset = FungibleAsset::new(faucet_id, 1_000).unwrap().into();
+    let asset_2: Asset = FungibleAsset::new(faucet_id, 2_000).unwrap().into();
+    let asset_3: Asset = FungibleAsset::new(faucet_id, 3_000).unwrap().into();
+    let vault_key = asset_1.vault_key();
+
+    queries::insert_account_vault_asset(conn, account_id, block_1, vault_key, Some(asset_1))
+        .unwrap();
+    queries::insert_account_vault_asset(conn, account_id, block_2, vault_key, Some(asset_2))
+        .unwrap();
+    queries::insert_account_vault_asset(conn, account_id, block_3, vault_key, Some(asset_3))
+        .unwrap();
+
+    let (_, historical_values) =
+        queries::select_account_vault_assets(conn, account_id, block_1..=block_3, false).unwrap();
+    let historical_values: Vec<_> = historical_values
+        .into_iter()
+        .filter(|value| value.vault_key == vault_key)
+        .collect();
+
+    assert_eq!(
+        historical_values.len(),
+        3,
+        "SyncAccountVault should return historical updates when latest_only is false"
+    );
+    assert_eq!(
+        historical_values.iter().map(|value| value.block_num).collect::<Vec<_>>(),
+        vec![block_1, block_2, block_3]
+    );
+    assert_eq!(
+        historical_values.iter().map(|value| value.asset).collect::<Vec<_>>(),
+        vec![Some(asset_1), Some(asset_2), Some(asset_3)]
+    );
+
+    let (_, latest_only_values) =
+        queries::select_account_vault_assets(conn, account_id, block_1..=block_3, true).unwrap();
+    let latest_only_values: Vec<_> = latest_only_values
+        .into_iter()
+        .filter(|value| value.vault_key == vault_key)
+        .collect();
+
+    assert_eq!(
+        latest_only_values.len(),
+        1,
+        "SyncAccountVault should return only the latest value for each vault key when latest_only is true"
+    );
+    assert_eq!(latest_only_values[0].block_num, block_3);
+    assert_eq!(latest_only_values[0].asset, Some(asset_3));
 }
 
 #[test]
@@ -1082,7 +1152,7 @@ fn insert_account_delta(
 
 #[test]
 #[miden_node_test_macro::enable_logging]
-fn sql_account_storage_map_values_insertion() {
+fn sync_account_storage_maps_returns_historical_or_latest_only() {
     use std::collections::BTreeMap;
 
     use miden_protocol::account::StorageMapDelta;
@@ -1118,15 +1188,6 @@ fn sql_account_storage_map_values_insertion() {
         AccountDelta::new(account_id, storage1, AccountVaultDelta::default(), Felt::ONE).unwrap();
     insert_account_delta(conn, account_id, block1, &delta1);
 
-    let storage_map_page = queries::select_account_storage_map_values_paged(
-        conn,
-        account_id,
-        BlockNumber::GENESIS..=block1,
-        1024,
-    )
-    .unwrap();
-    assert_eq!(storage_map_page.values.len(), 2, "expect 2 initial rows");
-
     // Update key1 at block 2
     let mut map2 = StorageMapDelta::default();
     map2.insert(key1, value3);
@@ -1142,29 +1203,69 @@ fn sql_account_storage_map_values_insertion() {
         account_id,
         BlockNumber::GENESIS..=block2,
         1024,
+        false,
     )
     .unwrap();
 
-    assert_eq!(storage_map_values.values.len(), 3, "three rows (with duplicate key)");
-    // key1 should now be value3 at block2; key2 remains value2 at block1
+    assert_eq!(
+        storage_map_values.values.len(),
+        3,
+        "historical mode should return every update in the requested range"
+    );
+    assert!(
+        storage_map_values
+            .values
+            .iter()
+            .any(|val| val.slot_name == slot_name && val.key == key1 && val.value == value1),
+        "historical mode should include the original value for key1"
+    );
     assert!(
         storage_map_values
             .values
             .iter()
             .any(|val| val.slot_name == slot_name && val.key == key1 && val.value == value3),
-        "key1 should point to new value at block2"
+        "historical mode should include the updated value for key1"
     );
     assert!(
         storage_map_values
             .values
             .iter()
             .any(|val| val.slot_name == slot_name && val.key == key2 && val.value == value2),
-        "key2 should stay the same (from block1)"
+        "historical mode should preserve keys that were not updated"
+    );
+
+    let latest_only_page = queries::select_account_storage_map_values_paged(
+        conn,
+        account_id,
+        BlockNumber::GENESIS..=block2,
+        1024,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        latest_only_page.values.len(),
+        2,
+        "latest_only should keep only the newest row for each slot/key pair"
+    );
+    assert!(
+        latest_only_page
+            .values
+            .iter()
+            .any(|val| val.slot_name == slot_name && val.key == key1 && val.value == value3),
+        "latest_only should keep the updated value for key1"
+    );
+    assert!(
+        latest_only_page
+            .values
+            .iter()
+            .any(|val| val.slot_name == slot_name && val.key == key2 && val.value == value2),
+        "latest_only should preserve keys that were not updated"
     );
 }
 
 #[test]
-fn select_storage_map_sync_values() {
+fn select_storage_map_sync_values_respects_range_and_order() {
     let mut conn = create_db();
     let account_id = AccountId::try_from(ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_IMMUTABLE_CODE).unwrap();
     let slot_name = StorageSlotName::mock(5);
@@ -1242,10 +1343,11 @@ fn select_storage_map_sync_values() {
         account_id,
         BlockNumber::from(2)..=BlockNumber::from(3),
         1024,
+        false,
     )
     .unwrap();
 
-    assert_eq!(page.values.len(), 3, "should return latest values");
+    assert_eq!(page.values.len(), 3, "should return only values in the requested block range");
 
     // Compare ordered by key using a tuple view to avoid relying on the concrete struct name
     let expected = vec![
@@ -1269,7 +1371,10 @@ fn select_storage_map_sync_values() {
         },
     ];
 
-    assert_eq!(page.values, expected, "should return latest values ordered by key");
+    assert_eq!(
+        page.values, expected,
+        "should preserve the expected ordering for historical values in the requested range"
+    );
 }
 
 #[test]
@@ -1299,6 +1404,7 @@ fn select_storage_map_sync_values_for_network_account() {
         account_id,
         BlockNumber::GENESIS..=block_num,
         1024,
+        false,
     )
     .unwrap();
 
@@ -1363,6 +1469,7 @@ fn select_storage_map_sync_values_paginates_until_last_block() {
         account_id,
         BlockNumber::GENESIS..=block3,
         1,
+        false,
     )
     .unwrap();
 
@@ -1406,6 +1513,7 @@ fn select_storage_map_sync_values_all_entries_in_genesis_block() {
         account_id,
         genesis..=genesis,
         1,
+        false,
     );
 
     // Should not error - should return a valid page (possibly with empty values
@@ -1446,9 +1554,14 @@ fn select_storage_map_sync_values_all_entries_in_single_non_genesis_block() {
     }
 
     // limit=1, so 3 rows > 1 triggers pagination. All in block 5.
-    let page =
-        queries::select_account_storage_map_values_paged(&mut conn, account_id, block5..=block5, 1)
-            .unwrap();
+    let page = queries::select_account_storage_map_values_paged(
+        &mut conn,
+        account_id,
+        block5..=block5,
+        1,
+        false,
+    )
+    .unwrap();
 
     assert!(page.values.is_empty(), "should have no values when single block exceeds limit");
     assert_eq!(page.last_block_included, block5, "should signal no progress at block 5");
@@ -1512,6 +1625,7 @@ fn select_storage_map_sync_values_multi_block_pagination() {
         account_id,
         BlockNumber::GENESIS..=block3,
         2,
+        false,
     )
     .unwrap();
 
@@ -2198,6 +2312,7 @@ fn regression_1461_full_state_delta_inserts_vault_assets() {
         &mut conn,
         account_id,
         BlockNumber::GENESIS..=block_num,
+        false,
     )
     .unwrap();
 
@@ -2525,6 +2640,7 @@ fn db_roundtrip_vault_assets() {
         &mut conn,
         account_id,
         BlockNumber::GENESIS..=block_num,
+        false,
     )
     .unwrap();
 
@@ -2570,6 +2686,7 @@ fn db_roundtrip_storage_map_values() {
         account_id,
         BlockNumber::GENESIS..=block_num,
         1024,
+        false,
     )
     .unwrap();
 
@@ -2886,9 +3003,10 @@ fn test_prune_history() {
     )
     .unwrap();
 
-    // Verify initial state - should have 4 vault assets and 4 storage map values
+    // Verify initial state - should have 4 vault assets and 4 storage map values.
     let (_, initial_vault_assets) =
-        queries::select_account_vault_assets(conn, public_account_id, block_0..=block_tip).unwrap();
+        queries::select_account_vault_assets(conn, public_account_id, block_0..=block_tip, false)
+            .unwrap();
     assert_eq!(initial_vault_assets.len(), 4, "should have 4 vault assets before cleanup");
 
     let initial_storage_values = queries::select_account_storage_map_values_paged(
@@ -2896,6 +3014,7 @@ fn test_prune_history() {
         public_account_id,
         block_0..=block_tip,
         1024,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -2915,7 +3034,8 @@ fn test_prune_history() {
 
     // Verify remaining vault assets - should have 3 (cutoff, update, tip)
     let (_, remaining_vault_assets) =
-        queries::select_account_vault_assets(conn, public_account_id, block_0..=block_tip).unwrap();
+        queries::select_account_vault_assets(conn, public_account_id, block_0..=block_tip, false)
+            .unwrap();
     assert_eq!(remaining_vault_assets.len(), 3, "should have 3 vault assets after cleanup");
 
     // Verify no vault asset at block_old remains
@@ -2944,6 +3064,7 @@ fn test_prune_history() {
         public_account_id,
         block_0..=block_tip,
         1024,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -2995,7 +3116,8 @@ fn test_prune_history() {
 
     // Verify the old latest entry still exists
     let (_, vault_assets_with_latest) =
-        queries::select_account_vault_assets(conn, public_account_id, block_0..=block_tip).unwrap();
+        queries::select_account_vault_assets(conn, public_account_id, block_0..=block_tip, false)
+            .unwrap();
     assert!(
         vault_assets_with_latest
             .iter()
@@ -3026,6 +3148,7 @@ fn account_state_forest_matches_db_storage_map_roots_across_updates() {
             account_id,
             BlockNumber::GENESIS..=block_num,
             1024,
+            false,
         )
         .unwrap();
 

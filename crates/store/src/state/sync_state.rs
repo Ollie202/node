@@ -158,20 +158,30 @@ impl State {
     // --------------------------------------------------------------------------------------------
 
     /// Returns account vault updates for specified account within a block range.
+    ///
+    /// If `latest_only` is true, returns at most one update per vault key. Otherwise, returns all
+    /// updates in the requested range.
     pub async fn sync_account_vault(
         &self,
         account_id: AccountId,
         block_range: RangeInclusive<BlockNumber>,
+        latest_only: bool,
     ) -> Result<(BlockNumber, Vec<AccountVaultValue>), DatabaseError> {
-        self.db.get_account_vault_sync(account_id, block_range).await
+        self.db.get_account_vault_sync(account_id, block_range, latest_only).await
     }
 
     /// Returns storage map values for syncing within a block range.
+    ///
+    /// If `latest_only` is true, returns at most one update per slot/key pair. Otherwise, returns
+    /// all updates in the requested range.
     pub async fn sync_account_storage_maps(
         &self,
         account_id: AccountId,
         block_range: RangeInclusive<BlockNumber>,
+        latest_only: bool,
     ) -> Result<StorageMapValuesPage, DatabaseError> {
-        self.db.select_storage_map_sync_values(account_id, block_range, None).await
+        self.db
+            .select_storage_map_sync_values(account_id, block_range, None, latest_only)
+            .await
     }
 }

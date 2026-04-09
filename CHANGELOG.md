@@ -2,6 +2,7 @@
 
 ## v0.15.0 (TBD)
 
+- Added a `latest_only` flag to `SyncAccountVault` and `SyncAccountStorageMaps` to return only the latest values within the requested range ([#1906](https://github.com/0xMiden/node/pull/1906)).
 - [BREAKING] Changed `GetBlockByNumber` to accept a `BlockRequest` (with optional `include_proof` flag) and returns a response containing the block and an optional block proof ([#1864](https://github.com/0xMiden/node/pull/1864)).
 
 ## v0.14.4 (2026-04-08)

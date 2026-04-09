@@ -409,6 +409,7 @@ pub(crate) fn select_public_account_ids_paged(
 /// * `account_id`: Account ID to query
 /// * `block_from`: Starting block number
 /// * `block_to`: Ending block number
+/// * `latest_only`: When true, return at most one row per vault key
 /// * Response payload size: 0 <= size <= 2MB
 /// * Vault assets per response: 0 <= count <= (2MB / (2*Word + u32)) + 1
 ///
@@ -425,6 +426,7 @@ pub(crate) fn select_public_account_ids_paged(
 ///     account_id = ?1
 ///     AND block_num >= ?2
 ///     AND block_num <= ?3
+///     AND is_latest = TRUE  -- when latest_only = TRUE
 /// ORDER BY
 ///     block_num ASC
 /// LIMIT
@@ -434,6 +436,7 @@ pub(crate) fn select_account_vault_assets(
     conn: &mut SqliteConnection,
     account_id: AccountId,
     block_range: RangeInclusive<BlockNumber>,
+    latest_only: bool,
 ) -> Result<(BlockNumber, Vec<AccountVaultValue>), DatabaseError> {
     use schema::account_vault_assets as t;
     // TODO: These limits should be given by the protocol.
@@ -452,17 +455,23 @@ pub(crate) fn select_account_vault_assets(
         });
     }
 
-    let raw: Vec<(i64, Vec<u8>, Option<Vec<u8>>)> =
-        SelectDsl::select(t::table, (t::block_num, t::vault_key, t::asset))
-            .filter(
-                t::account_id
-                    .eq(account_id.to_bytes())
-                    .and(t::block_num.ge(block_range.start().to_raw_sql()))
-                    .and(t::block_num.le(block_range.end().to_raw_sql())),
-            )
-            .order(t::block_num.asc())
-            .limit(i64::try_from(MAX_ROWS + 1).expect("should fit within i64"))
-            .load::<(i64, Vec<u8>, Option<Vec<u8>>)>(conn)?;
+    let mut query = SelectDsl::select(t::table, (t::block_num, t::vault_key, t::asset))
+        .filter(
+            t::account_id
+                .eq(account_id.to_bytes())
+                .and(t::block_num.ge(block_range.start().to_raw_sql()))
+                .and(t::block_num.le(block_range.end().to_raw_sql())),
+        )
+        .into_boxed();
+
+    if latest_only {
+        query = query.filter(t::is_latest.eq(true));
+    }
+
+    let raw: Vec<(i64, Vec<u8>, Option<Vec<u8>>)> = query
+        .order(t::block_num.asc())
+        .limit(i64::try_from(MAX_ROWS + 1).expect("should fit within i64"))
+        .load::<(i64, Vec<u8>, Option<Vec<u8>>)>(conn)?;
 
     // If we got more rows than the limit, the last block may be incomplete so we
     // drop it entirely and derive last_block_included from the remaining rows.
@@ -675,6 +684,7 @@ impl StorageMapValue {
 ///
 /// * `account_id`: Account ID to query
 /// * `block_range`: Range of block numbers (inclusive)
+/// * `latest_only`: When true, return at most one row per slot/key pair
 ///
 /// ## Response
 ///
@@ -685,6 +695,7 @@ pub(crate) fn select_account_storage_map_values_paged(
     account_id: AccountId,
     block_range: RangeInclusive<BlockNumber>,
     limit: usize,
+    latest_only: bool,
 ) -> Result<StorageMapValuesPage, DatabaseError> {
     use schema::account_storage_map_values as t;
 
@@ -699,17 +710,23 @@ pub(crate) fn select_account_storage_map_values_paged(
         });
     }
 
-    let raw: Vec<StorageMapValueRow> =
-        SelectDsl::select(t::table, (t::block_num, t::slot_name, t::key, t::value))
-            .filter(
-                t::account_id
-                    .eq(account_id.to_bytes())
-                    .and(t::block_num.ge(block_range.start().to_raw_sql()))
-                    .and(t::block_num.le(block_range.end().to_raw_sql())),
-            )
-            .order(t::block_num.asc())
-            .limit(i64::try_from(limit + 1).expect("limit fits within i64"))
-            .load(conn)?;
+    let mut query = SelectDsl::select(t::table, (t::block_num, t::slot_name, t::key, t::value))
+        .filter(
+            t::account_id
+                .eq(account_id.to_bytes())
+                .and(t::block_num.ge(block_range.start().to_raw_sql()))
+                .and(t::block_num.le(block_range.end().to_raw_sql())),
+        )
+        .into_boxed();
+
+    if latest_only {
+        query = query.filter(t::is_latest.eq(true));
+    }
+
+    let raw: Vec<StorageMapValueRow> = query
+        .order(t::block_num.asc())
+        .limit(i64::try_from(limit + 1).expect("limit fits within i64"))
+        .load(conn)?;
 
     // If we got more rows than the limit, the last block may be incomplete so we
     // drop it entirely and derive last_block_included from the remaining rows.
