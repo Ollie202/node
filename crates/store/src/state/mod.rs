@@ -144,29 +144,29 @@ pub(crate) struct InMemoryState {
 pub struct State {
     /// The database which stores block headers, nullifiers, notes, and the latest states of
     /// accounts.
-    pub(crate) db: Arc<Db>,
+    pub(super) db: Arc<Db>,
 
     /// The block store which stores full block contents for all blocks.
-    pub(crate) block_store: Arc<BlockStore>,
+    pub(super) block_store: Arc<BlockStore>,
 
     /// Nullifier tree — append-only, backed by `RocksDB`.
     ///
     /// Lock-free via [`WriterGuard`]: `RocksDB` MVCC provides safe concurrent read access
     /// during writes.
-    pub(crate) nullifier_tree: WriterGuard<NullifierTree<LargeSmt<TreeStorage>>>,
+    pub(super) nullifier_tree: WriterGuard<NullifierTree<LargeSmt<TreeStorage>>>,
 
     /// All in-memory state (account tree, blockchain MMR, forest) held atomically.
     ///
     /// Readers call `snapshot()` which returns `Arc<InMemoryState>` via a wait-free atomic
     /// refcount bump — no data cloning. The writer deep-clones once per block, mutates the
     /// copy, and atomically swaps via `ArcSwap::store()`.
-    pub(crate) in_memory: ArcSwap<InMemoryState>,
+    pub(super) in_memory: ArcSwap<InMemoryState>,
 
     /// Channel to the single writer task.
     writer_tx: mpsc::Sender<writer::WriteRequest>,
 
     /// Request termination of the process due to a fatal internal state error.
-    pub(crate) termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
+    pub(super) termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
 
     /// The latest proven-in-sequence block number, updated by the proof scheduler.
     proven_tip: ProvenTipReader,
