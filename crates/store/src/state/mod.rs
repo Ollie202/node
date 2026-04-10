@@ -68,6 +68,7 @@ mod loader;
 use loader::{
     ACCOUNT_TREE_STORAGE_DIR,
     NULLIFIER_TREE_STORAGE_DIR,
+    SnapshotTreeStorage,
     StorageLoader,
     TreeStorage,
     load_mmr,
@@ -125,8 +126,8 @@ pub struct TransactionInputs {
 pub(crate) struct InMemoryState {
     /// The committed block number for this snapshot.
     pub block_num: BlockNumber,
-    /// Account tree with historical overlay support.
-    pub account_tree: AccountTreeWithHistory<TreeStorage>,
+    /// Account tree with historical overlay support (read-only, snapshot-backed).
+    pub account_tree: AccountTreeWithHistory<SnapshotTreeStorage>,
     /// Chain MMR (Merkle Mountain Range of block commitments).
     pub blockchain: Blockchain,
     /// Forest state for account storage maps and vault witnesses.
@@ -154,6 +155,19 @@ pub struct State {
     /// Lock-free via [`WriterGuard`]: `RocksDB` MVCC provides safe concurrent read access
     /// during writes.
     pub(super) nullifier_tree: WriterGuard<NullifierTree<LargeSmt<TreeStorage>>>,
+
+    /// Writable account tree — owned by the single writer task.
+    ///
+    /// Lock-free via [`WriterGuard`]: the writer applies mutations here, then creates
+    /// a snapshot-backed read-only copy for `InMemoryState`.
+    pub(super) account_tree: WriterGuard<AccountTreeWithHistory<TreeStorage>>,
+
+    /// Handle to the `RocksDB` database used for account tree storage.
+    ///
+    /// Used to create snapshot storage instances for read-only snapshots in `InMemoryState`.
+    /// Stored as `Arc<DB>` obtained from `RocksDbStorage::db()`.
+    #[cfg(feature = "rocksdb")]
+    pub(super) account_db: std::sync::Arc<miden_large_smt_backend_rocksdb::DB>,
 
     /// All in-memory state (account tree, blockchain MMR, forest) held atomically.
     ///
@@ -208,6 +222,11 @@ impl State {
             &storage_options.account_tree.into(),
             ACCOUNT_TREE_STORAGE_DIR,
         )?;
+
+        // Grab the DB handle before loading (needed for creating snapshots).
+        #[cfg(feature = "rocksdb")]
+        let account_db = std::sync::Arc::clone(account_storage.db());
+
         let account_tree = account_storage.load_account_tree(&mut db).await?;
 
         let nullifier_storage = TreeStorage::create(
@@ -220,7 +239,34 @@ impl State {
         // Verify that tree roots match the expected roots from the database.
         verify_tree_consistency(account_tree.root(), nullifier_tree.root(), &mut db).await?;
 
-        let account_tree = AccountTreeWithHistory::new(account_tree, latest_block_num);
+        // Create the writable account tree with history (owned by the writer).
+        let account_tree_with_history = AccountTreeWithHistory::new(account_tree, latest_block_num);
+
+        // Create a snapshot-backed read-only account tree for InMemoryState.
+        let snapshot_account_tree = {
+            #[cfg(feature = "rocksdb")]
+            {
+                use miden_large_smt_backend_rocksdb::RocksDbSnapshotStorage;
+
+                let snapshot_storage = RocksDbSnapshotStorage::new(Arc::clone(&account_db));
+                let snapshot_smt = loader::load_smt(snapshot_storage)
+                    .map_err(|e| StateInitializationError::AccountTreeIoError(e.to_string()))?;
+                // SAFETY: The snapshot reads from the same DB that the writable tree
+                // was just loaded and validated from. No need to re-validate.
+                let snapshot_tree =
+                    miden_protocol::block::account_tree::AccountTree::new_unchecked(snapshot_smt);
+                AccountTreeWithHistory::from_parts(
+                    snapshot_tree,
+                    account_tree_with_history.block_number_latest(),
+                    account_tree_with_history.overlays().clone(),
+                )
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            {
+                // In memory mode, the trees are the same type, just clone.
+                account_tree_with_history.clone()
+            }
+        };
 
         let forest = load_smt_forest(&mut db, latest_block_num).await?;
 
@@ -236,7 +282,7 @@ impl State {
 
         let in_memory = ArcSwap::from_pointee(InMemoryState {
             block_num: latest_block_num,
-            account_tree,
+            account_tree: snapshot_account_tree,
             blockchain,
             forest,
         });
@@ -245,6 +291,9 @@ impl State {
             db,
             block_store,
             nullifier_tree: WriterGuard::new(nullifier_tree),
+            account_tree: WriterGuard::new(account_tree_with_history),
+            #[cfg(feature = "rocksdb")]
+            account_db,
             in_memory,
             writer_tx,
             termination_ask,

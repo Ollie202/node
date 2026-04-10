@@ -36,11 +36,10 @@ pub(crate) async fn writer_loop(mut rx: mpsc::Receiver<WriteRequest>, state: Arc
 ///
 /// ## Consistency model
 ///
-/// This function is the sole writer to all in-memory state. The nullifier tree (backed by
-/// `RocksDB` with MVCC) is accessed lock-free via [`WriterGuard`]. The in-memory structures
-/// (`account_tree`, `blockchain`, `forest`) are held in an `Arc<InMemoryState>` behind an
-/// `ArcSwap`. The writer loads the current state, validates against it, commits to DB, then
-/// deep-clones the state, applies mutations, and atomically swaps the pointer.
+/// This function is the sole writer to all state. Both the nullifier tree and account tree
+/// (backed by `RocksDB` with MVCC) are accessed lock-free via [`WriterGuard`]. The writer
+/// applies mutations to the writable trees, then creates a new `InMemoryState` with a
+/// snapshot-backed read-only account tree and atomically swaps the pointer.
 ///
 /// Readers never block: they obtain an `Arc` via `ArcSwap::load_full()`, which performs only an
 /// atomic refcount increment with no data cloning. The atomic swap guarantees readers see either
@@ -49,8 +48,8 @@ pub(crate) async fn writer_loop(mut rx: mpsc::Receiver<WriteRequest>, state: Arc
 ///
 /// ## Performance
 ///
-/// The only deep clone of `InMemoryState` occurs once per block in this function. Readers pay
-/// only an atomic refcount bump per `snapshot()` call.
+/// No deep clone of account tree data occurs. The snapshot-backed account tree reads directly
+/// from a `RocksDB` snapshot. Readers pay only an atomic refcount bump per `snapshot()` call.
 #[expect(clippy::too_many_lines)]
 #[instrument(target = COMPONENT, skip_all, err, fields(block.number = signed_block.header().block_num().as_u32()))]
 async fn apply_block_inner(
@@ -107,9 +106,11 @@ async fn apply_block_inner(
 
     // Compute mutations required for updating account and nullifier trees.
     // The nullifier tree uses WriterGuard (RocksDB MVCC — safe for concurrent access).
-    // The account tree and blockchain are read from the snapshot (no locks needed).
+    // The account tree uses WriterGuard — the writer owns the writable copy.
     let (nullifier_tree_update, account_tree_update) = {
         let nullifier_tree = unsafe { state.nullifier_tree.as_mut() };
+        // SAFETY: This is the single writer task, serialized by the channel.
+        let account_tree = unsafe { state.account_tree.as_mut() };
 
         let _span = info_span!(target: COMPONENT, "compute_tree_mutations").entered();
 
@@ -144,9 +145,8 @@ async fn apply_block_inner(
             return Err(InvalidBlockError::NewBlockInvalidNullifierRoot.into());
         }
 
-        // Compute update for account tree.
-        let account_tree_update = snapshot
-            .account_tree
+        // Compute update for account tree from the writable tree (always in sync with DB).
+        let account_tree_update = account_tree
             .compute_mutations(
                 body.updated_accounts()
                     .iter()
@@ -223,11 +223,7 @@ async fn apply_block_inner(
     // Await the block store save task.
     block_save_task.await??;
 
-    // Deep-clone the in-memory state to produce an owned mutable copy for applying mutations.
-    // This is the only deep clone per block — readers pay only an atomic refcount bump.
-    let mut new_state = InMemoryState::clone(&snapshot);
-
-    // Nullifier tree: lock-free via WriterGuard (RocksDB MVCC).
+    // Apply mutations to the writable trees (writes to RocksDB).
     // SAFETY: This is the single writer task, serialized by the channel.
     unsafe {
         state
@@ -237,16 +233,60 @@ async fn apply_block_inner(
             .expect("Unreachable: mutations were computed from the current tree state");
     }
 
-    new_state
-        .account_tree
-        .apply_mutations(account_tree_update)
-        .expect("Unreachable: mutations were computed from the current tree state");
+    // SAFETY: This is the single writer task, serialized by the channel.
+    unsafe {
+        state
+            .account_tree
+            .as_mut()
+            .apply_mutations(account_tree_update)
+            .expect("Unreachable: mutations were computed from the current tree state");
+    }
 
-    new_state.blockchain.push(block_commitment);
+    // Build a new read-only InMemoryState with a snapshot-backed account tree.
+    // The snapshot captures the RocksDB state after mutations have been applied.
+    let snapshot_account_tree = {
+        #[cfg(feature = "rocksdb")]
+        {
+            use crate::accounts::AccountTreeWithHistory;
+            use crate::state::loader;
 
-    new_state.forest.apply_block_updates(block_num, account_deltas)?;
+            let snapshot_storage = miden_large_smt_backend_rocksdb::RocksDbSnapshotStorage::new(
+                std::sync::Arc::clone(&state.account_db),
+            );
+            let snapshot_smt = loader::load_smt(snapshot_storage)
+                .expect("Unreachable: snapshot reads from data just written by apply_mutations");
+            let snapshot_tree =
+                miden_protocol::block::account_tree::AccountTree::new_unchecked(snapshot_smt);
 
-    new_state.block_num = block_num;
+            // SAFETY: Single writer — safe to read overlays and block number.
+            let writable_tree = unsafe { state.account_tree.as_mut() };
+            AccountTreeWithHistory::from_parts(
+                snapshot_tree,
+                writable_tree.block_number_latest(),
+                writable_tree.overlays().clone(),
+            )
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            // In memory mode, clone the writable tree (which already has mutations applied).
+            // SAFETY: Single writer — safe to read from the writable tree.
+            let writable_tree = unsafe { state.account_tree.as_mut() };
+            writable_tree.clone()
+        }
+    };
+
+    let mut new_blockchain = snapshot.blockchain.clone();
+    new_blockchain.push(block_commitment);
+
+    let mut new_forest = snapshot.forest.clone();
+    new_forest.apply_block_updates(block_num, account_deltas)?;
+
+    let new_state = InMemoryState {
+        block_num,
+        account_tree: snapshot_account_tree,
+        blockchain: new_blockchain,
+        forest: new_forest,
+    };
 
     // Atomically publish the new state. Readers that call snapshot() after this point
     // will see the updated state. Readers holding the old Arc continue unaffected.

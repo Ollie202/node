@@ -14,7 +14,7 @@ use std::path::Path;
 
 use miden_crypto::merkle::mmr::Mmr;
 #[cfg(feature = "rocksdb")]
-use miden_large_smt_backend_rocksdb::RocksDbStorage;
+use miden_large_smt_backend_rocksdb::{RocksDbStorage, SmtStorageReader};
 use miden_node_utils::clap::RocksDbOptions;
 use miden_protocol::block::account_tree::{AccountIdKey, AccountTree};
 use miden_protocol::block::nullifier_tree::NullifierTree;
@@ -57,11 +57,20 @@ const PUBLIC_ACCOUNT_IDS_PAGE_SIZE: NonZeroUsize = NonZeroUsize::new(1_000).unwr
 // STORAGE TYPE ALIAS
 // ================================================================================================
 
-/// The storage backend for trees.
+/// The writable storage backend for trees.
 #[cfg(feature = "rocksdb")]
 pub type TreeStorage = RocksDbStorage;
 #[cfg(not(feature = "rocksdb"))]
 pub type TreeStorage = MemoryStorage;
+
+/// The read-only storage backend used by `InMemoryState` for lock-free reads.
+///
+/// With `rocksdb`, this is a snapshot-backed read-only storage (`RocksDbSnapshotStorage`).
+/// Without `rocksdb`, this is the same as `TreeStorage` (in-memory, already `Clone`).
+#[cfg(feature = "rocksdb")]
+pub type SnapshotTreeStorage = miden_large_smt_backend_rocksdb::RocksDbSnapshotStorage;
+#[cfg(not(feature = "rocksdb"))]
+pub type SnapshotTreeStorage = MemoryStorage;
 
 // ERROR CONVERSION
 // ================================================================================================
@@ -340,7 +349,7 @@ impl StorageLoader for RocksDbStorage {
 
 /// Loads an SMT from persistent storage.
 #[cfg(feature = "rocksdb")]
-pub fn load_smt<S: SmtStorage>(storage: S) -> Result<LargeSmt<S>, StateInitializationError> {
+pub fn load_smt<S: SmtStorageReader>(storage: S) -> Result<LargeSmt<S>, StateInitializationError> {
     LargeSmt::load(storage).map_err(account_tree_large_smt_error_to_init_error)
 }
 

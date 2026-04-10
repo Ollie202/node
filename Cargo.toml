@@ -63,7 +63,7 @@ miden-node-rocksdb-cxx-linkage-fix = { path = "crates/rocksdb-cxx-linkage-fix", 
 # miden-protocol dependencies. These should be updated in sync.
 miden-agglayer        = { version = "0.14" }
 miden-block-prover    = { version = "0.14" }
-miden-protocol        = { default-features = false, version = "0.14" }
+miden-protocol        = { default-features = false, version = "=0.14.3" }
 miden-standards       = { version = "0.14" }
 miden-testing         = { version = "0.14" }
 miden-tx              = { default-features = false, version = "0.14" }
@@ -146,3 +146,12 @@ files.extend-exclude = ["*.svg"] # Ignore SVG files.
 [patch.crates-io]
 miden-crypto      = { branch = "sergerad-clone", git = "https://github.com/0xmiden/crypto" }
 miden-serde-utils = { branch = "sergerad-clone", git = "https://github.com/0xmiden/crypto" }
+
+miden-agglayer         = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-block-prover     = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-protocol         = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-protocol-macros  = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-standards        = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-testing          = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-tx               = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }
+miden-tx-batch-prover  = { branch = "sergerad-clone", git = "https://github.com/0xmiden/protocol" }

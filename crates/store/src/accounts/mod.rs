@@ -15,6 +15,7 @@ use miden_protocol::crypto::merkle::smt::{
     SMT_DEPTH,
     SmtLeaf,
     SmtStorage,
+    SmtStorageReader,
 };
 use miden_protocol::crypto::merkle::{
     EmptySubtreeRoots,
@@ -68,7 +69,7 @@ enum HistoricalSelector {
 
 /// Captures reversion state for historical queries at a specific block.
 #[derive(Debug, Clone)]
-struct HistoricalOverlay {
+pub(crate) struct HistoricalOverlay {
     block_number: BlockNumber,
     root: Word,
     node_mutations: HashMap<NodeIndex, Word>,
@@ -116,7 +117,7 @@ impl HistoricalOverlay {
 /// reversion data (mutations that undo changes). Historical witnesses are reconstructed
 /// by starting from the latest state and applying reversion overlays backwards in time.
 #[derive(Debug, Clone)]
-pub struct AccountTreeWithHistory<S: SmtStorage> {
+pub struct AccountTreeWithHistory<S: SmtStorageReader> {
     /// The current block number (latest state).
     block_number: BlockNumber,
     /// The latest account tree state.
@@ -125,7 +126,7 @@ pub struct AccountTreeWithHistory<S: SmtStorage> {
     overlays: BTreeMap<BlockNumber, HistoricalOverlay>,
 }
 
-impl<S: SmtStorage> AccountTreeWithHistory<S> {
+impl<S: SmtStorageReader> AccountTreeWithHistory<S> {
     /// Maximum number of historical blocks to maintain.
     pub const MAX_HISTORY: usize = 50;
 
@@ -339,8 +340,37 @@ impl<S: SmtStorage> AccountTreeWithHistory<S> {
         Some((path, leaf))
     }
 
-    // PUBLIC MUTATORS
+    // PUBLIC ACCESSORS (continued)
     // --------------------------------------------------------------------------------------------
+
+    /// Returns a reference to the historical overlays.
+    pub(crate) fn overlays(&self) -> &BTreeMap<BlockNumber, HistoricalOverlay> {
+        &self.overlays
+    }
+
+    /// Creates an `AccountTreeWithHistory` from its constituent parts.
+    ///
+    /// This is used by the writer to construct a snapshot-backed read-only copy.
+    pub(crate) fn from_parts(
+        latest: AccountTree<LargeSmt<S>>,
+        block_number: BlockNumber,
+        overlays: BTreeMap<BlockNumber, HistoricalOverlay>,
+    ) -> Self {
+        Self { block_number, latest, overlays }
+    }
+}
+
+impl<S: SmtStorage> AccountTreeWithHistory<S> {
+    // MUTATORS
+    // --------------------------------------------------------------------------------------------
+
+    /// Computes mutations relative to the latest state.
+    pub fn compute_mutations(
+        &self,
+        account_commitments: impl IntoIterator<Item = (AccountId, Word)>,
+    ) -> Result<AccountMutationSet, HistoricalError> {
+        Ok(self.latest.compute_mutations(account_commitments)?)
+    }
 
     /// Computes and applies mutations in one operation.
     ///
@@ -351,14 +381,6 @@ impl<S: SmtStorage> AccountTreeWithHistory<S> {
     ) -> Result<(), HistoricalError> {
         let mutations = self.compute_mutations(account_commitments)?;
         self.apply_mutations(mutations)
-    }
-
-    /// Computes mutations relative to the latest state.
-    pub fn compute_mutations(
-        &self,
-        account_commitments: impl IntoIterator<Item = (AccountId, Word)>,
-    ) -> Result<AccountMutationSet, HistoricalError> {
-        Ok(self.latest.compute_mutations(account_commitments)?)
     }
 
     /// Applies mutations and advances to the next block.

@@ -27,6 +27,8 @@ mod helpers;
 #[expect(clippy::doc_markdown, clippy::inline_always)]
 mod rocksdb;
 // Re-export from miden-protocol.
+/// Re-export of `rocksdb::DB` for consumers that need the raw database handle type.
+pub use ::rocksdb::DB;
 pub use miden_protocol::crypto::merkle::smt::{
     InnerNode,
     LargeSmt,
@@ -39,6 +41,8 @@ pub use miden_protocol::crypto::merkle::smt::{
     SmtLeafError,
     SmtProof,
     SmtStorage,
+    SmtStorageReader,
+    SmtStorageWriter,
     StorageError,
     StorageUpdateParts,
     StorageUpdates,
@@ -56,4 +60,4 @@ pub use miden_protocol::{
         merkle::{EmptySubtreeRoots, InnerNodeInfo, MerkleError, NodeIndex, SparseMerklePath},
     },
 };
-pub use rocksdb::{RocksDbConfig, RocksDbStorage};
+pub use rocksdb::{RocksDbConfig, RocksDbSnapshotStorage, RocksDbStorage};
