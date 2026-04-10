@@ -6,8 +6,8 @@
 //! reads with no lock contention.
 //!
 //! Readers obtain an `Arc<InMemoryState>` via [`State::snapshot()`] (wait-free, no locks).
-//! The writer applies mutations to its own writable trees (behind [`WriterGuard`]), then builds a
-//! new `InMemoryState` with snapshot-backed read-only copies and atomically swaps the pointer.
+//! The writer applies mutations to its own writable trees (owned directly, no locks), then builds
+//! a new `InMemoryState` with snapshot-backed read-only copies and atomically swaps the pointer.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeInclusive;
@@ -78,9 +78,6 @@ use loader::{
 
 mod sync_state;
 pub(crate) mod writer;
-mod writer_guard;
-
-pub(crate) use writer_guard::WriterGuard;
 
 // FINALITY
 // ================================================================================================
@@ -143,8 +140,9 @@ pub(crate) struct InMemoryState {
 ///
 /// A single writer task (serialized by a channel) mutates the state. All trees, the blockchain
 /// MMR, and the forest are held in an `Arc<InMemoryState>` behind an [`ArcSwap`], providing
-/// wait-free reads. The writer keeps its own writable copies of the trees behind [`WriterGuard`]
-/// and creates snapshot-backed read-only copies for `InMemoryState` after each block.
+/// wait-free reads. The writer owns writable copies of the trees directly (passed as owned
+/// values to [`writer::writer_loop`]) and creates snapshot-backed read-only copies for
+/// `InMemoryState` after each block.
 pub struct State {
     /// The database which stores block headers, nullifiers, notes, and the latest states of
     /// accounts.
@@ -153,25 +151,13 @@ pub struct State {
     /// The block store which stores full block contents for all blocks.
     pub(super) block_store: Arc<BlockStore>,
 
-    /// Writable nullifier tree — owned by the single writer task.
-    ///
-    /// Writer-only via [`WriterGuard`]. Readers access the snapshot-backed copy in
-    /// `InMemoryState` instead.
-    pub(super) nullifier_tree: WriterGuard<NullifierTree<LargeSmt<TreeStorage>>>,
-
-    /// Writable account tree — owned by the single writer task.
-    ///
-    /// Writer-only via [`WriterGuard`]. Readers access the snapshot-backed copy in
-    /// `InMemoryState` instead.
-    pub(super) account_tree: WriterGuard<AccountTreeWithHistory<TreeStorage>>,
-
     /// Handle to the RocksDB database used for account tree storage.
-    /// Used to create snapshot storage instances for read-only snapshots in `InMemoryState`.
+    /// Used by the writer to create snapshot storage instances for `InMemoryState`.
     #[cfg(feature = "rocksdb")]
     pub(super) account_db: std::sync::Arc<miden_large_smt_backend_rocksdb::DB>,
 
     /// Handle to the RocksDB database used for nullifier tree storage.
-    /// Used to create snapshot storage instances for read-only snapshots in `InMemoryState`.
+    /// Used by the writer to create snapshot storage instances for `InMemoryState`.
     #[cfg(feature = "rocksdb")]
     pub(super) nullifier_db: std::sync::Arc<miden_large_smt_backend_rocksdb::DB>,
 
@@ -320,8 +306,6 @@ impl State {
         let state = Arc::new(Self {
             db,
             block_store,
-            nullifier_tree: WriterGuard::new(nullifier_tree),
-            account_tree: WriterGuard::new(account_tree_with_history),
             #[cfg(feature = "rocksdb")]
             account_db,
             #[cfg(feature = "rocksdb")]
@@ -332,9 +316,14 @@ impl State {
             proven_tip,
         });
 
-        // Spawn the single writer task.
+        // Spawn the single writer task with owned writable trees.
         let writer_state = Arc::clone(&state);
-        tokio::spawn(writer::writer_loop(writer_rx, writer_state));
+        tokio::spawn(writer::writer_loop(
+            writer_rx,
+            writer_state,
+            nullifier_tree,
+            account_tree_with_history,
+        ));
 
         Ok((state, proven_tip_writer))
     }
@@ -381,8 +370,6 @@ impl State {
     /// The returned `Arc` is a frozen view: it keeps the snapshot alive for as long as needed,
     /// even if the writer swaps in a new state in the meantime. Readers holding the old `Arc`
     /// are completely unaffected by the swap.
-    ///
-    /// The nullifier tree is accessed separately via [`WriterGuard`] (lock-free, `RocksDB` MVCC).
     fn snapshot(&self) -> Arc<InMemoryState> {
         self.in_memory.load_full()
     }

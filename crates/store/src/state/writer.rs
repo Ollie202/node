@@ -4,14 +4,18 @@ use miden_node_proto::BlockProofRequest;
 use miden_node_utils::ErrorReport;
 use miden_protocol::account::delta::AccountUpdateDetails;
 use miden_protocol::block::SignedBlock;
+use miden_protocol::block::nullifier_tree::NullifierTree;
+use miden_protocol::crypto::merkle::smt::LargeSmt;
 use miden_protocol::note::NoteDetails;
 use miden_protocol::transaction::OutputNote;
 use miden_protocol::utils::serde::Serializable;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument, info, info_span, instrument};
 
+use crate::accounts::AccountTreeWithHistory;
 use crate::db::NoteRecord;
 use crate::errors::{ApplyBlockError, InvalidBlockError};
+use crate::state::loader::TreeStorage;
 use crate::state::{InMemoryState, State};
 use crate::{COMPONENT, HistoricalError};
 
@@ -23,11 +27,22 @@ pub struct WriteRequest {
 }
 
 /// Runs the single writer loop. Receives blocks through the channel and applies them
-/// sequentially. Channel serialization guarantees no concurrent writers — no mutex needed.
-pub(crate) async fn writer_loop(mut rx: mpsc::Receiver<WriteRequest>, state: Arc<State>) {
+/// sequentially. The writer owns the writable trees — no locks or interior mutability needed.
+pub(crate) async fn writer_loop(
+    mut rx: mpsc::Receiver<WriteRequest>,
+    state: Arc<State>,
+    mut nullifier_tree: NullifierTree<LargeSmt<TreeStorage>>,
+    mut account_tree: AccountTreeWithHistory<TreeStorage>,
+) {
     while let Some(req) = rx.recv().await {
-        let result =
-            Box::pin(apply_block_inner(&state, req.signed_block, req.proving_inputs)).await;
+        let result = Box::pin(apply_block_inner(
+            &state,
+            &mut nullifier_tree,
+            &mut account_tree,
+            req.signed_block,
+            req.proving_inputs,
+        ))
+        .await;
         let _ = req.result_tx.send(result);
     }
 }
@@ -36,10 +51,9 @@ pub(crate) async fn writer_loop(mut rx: mpsc::Receiver<WriteRequest>, state: Arc
 ///
 /// ## Consistency model
 ///
-/// This function is the sole writer to all state. Both the nullifier tree and account tree
-/// (backed by `RocksDB` with MVCC) are accessed lock-free via [`WriterGuard`]. The writer
-/// applies mutations to the writable trees, then creates a new `InMemoryState` with a
-/// snapshot-backed read-only account tree and atomically swaps the pointer.
+/// This function is the sole writer to all state. The writer owns the writable trees directly
+/// (no locks or interior mutability). It applies mutations, then creates a new `InMemoryState`
+/// with snapshot-backed read-only copies and atomically swaps the pointer.
 ///
 /// Readers never block: they obtain an `Arc` via `ArcSwap::load_full()`, which performs only an
 /// atomic refcount increment with no data cloning. The atomic swap guarantees readers see either
@@ -48,12 +62,14 @@ pub(crate) async fn writer_loop(mut rx: mpsc::Receiver<WriteRequest>, state: Arc
 ///
 /// ## Performance
 ///
-/// No deep clone of account tree data occurs. The snapshot-backed account tree reads directly
-/// from a `RocksDB` snapshot. Readers pay only an atomic refcount bump per `snapshot()` call.
+/// No deep clone of tree data occurs in RocksDB mode. The snapshot-backed trees read directly
+/// from RocksDB snapshots. Readers pay only an atomic refcount bump per `snapshot()` call.
 #[expect(clippy::too_many_lines)]
 #[instrument(target = COMPONENT, skip_all, err, fields(block.number = signed_block.header().block_num().as_u32()))]
 async fn apply_block_inner(
     state: &State,
+    nullifier_tree: &mut NullifierTree<LargeSmt<TreeStorage>>,
+    account_tree: &mut AccountTreeWithHistory<TreeStorage>,
     signed_block: SignedBlock,
     proving_inputs: Option<BlockProofRequest>,
 ) -> Result<(), ApplyBlockError> {
@@ -105,13 +121,7 @@ async fn apply_block_inner(
     let snapshot = state.in_memory.load_full();
 
     // Compute mutations required for updating account and nullifier trees.
-    // The nullifier tree uses WriterGuard (RocksDB MVCC — safe for concurrent access).
-    // The account tree uses WriterGuard — the writer owns the writable copy.
     let (nullifier_tree_update, account_tree_update) = {
-        let nullifier_tree = unsafe { state.nullifier_tree.as_mut() };
-        // SAFETY: This is the single writer task, serialized by the channel.
-        let account_tree = unsafe { state.account_tree.as_mut() };
-
         let _span = info_span!(target: COMPONENT, "compute_tree_mutations").entered();
 
         // Nullifiers can be produced only once.
@@ -224,23 +234,13 @@ async fn apply_block_inner(
     block_save_task.await??;
 
     // Apply mutations to the writable trees (writes to RocksDB).
-    // SAFETY: This is the single writer task, serialized by the channel.
-    unsafe {
-        state
-            .nullifier_tree
-            .as_mut()
-            .apply_mutations(nullifier_tree_update)
-            .expect("Unreachable: mutations were computed from the current tree state");
-    }
+    nullifier_tree
+        .apply_mutations(nullifier_tree_update)
+        .expect("Unreachable: mutations were computed from the current tree state");
 
-    // SAFETY: This is the single writer task, serialized by the channel.
-    unsafe {
-        state
-            .account_tree
-            .as_mut()
-            .apply_mutations(account_tree_update)
-            .expect("Unreachable: mutations were computed from the current tree state");
-    }
+    account_tree
+        .apply_mutations(account_tree_update)
+        .expect("Unreachable: mutations were computed from the current tree state");
 
     // Build a new read-only InMemoryState with snapshot-backed trees.
     // The snapshots capture the RocksDB state after mutations have been applied.
@@ -260,10 +260,7 @@ async fn apply_block_inner(
         }
         #[cfg(not(feature = "rocksdb"))]
         {
-            // In memory mode, clone the writable tree (which already has mutations applied).
-            // SAFETY: Single writer — safe to read from the writable tree.
-            let writable_tree = unsafe { state.nullifier_tree.as_mut() };
-            writable_tree.clone()
+            nullifier_tree.clone()
         }
     };
 
@@ -281,20 +278,15 @@ async fn apply_block_inner(
             let snapshot_tree =
                 miden_protocol::block::account_tree::AccountTree::new_unchecked(snapshot_smt);
 
-            // SAFETY: Single writer — safe to read overlays and block number.
-            let writable_tree = unsafe { state.account_tree.as_mut() };
             AccountTreeWithHistory::from_parts(
                 snapshot_tree,
-                writable_tree.block_number_latest(),
-                writable_tree.overlays().clone(),
+                account_tree.block_number_latest(),
+                account_tree.overlays().clone(),
             )
         }
         #[cfg(not(feature = "rocksdb"))]
         {
-            // In memory mode, clone the writable tree (which already has mutations applied).
-            // SAFETY: Single writer — safe to read from the writable tree.
-            let writable_tree = unsafe { state.account_tree.as_mut() };
-            writable_tree.clone()
+            account_tree.clone()
         }
     };
 
