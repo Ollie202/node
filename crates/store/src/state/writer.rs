@@ -223,7 +223,8 @@ async fn apply_block_inner(
         ));
 
     // Commit to DB. Readers continue to see the old in-memory state (via their Arc) while
-    // the DB commits.
+    // the DB commits. We ensure consistency by scoping all RPC queries that hit DB data by the
+    // block number that is Arc swapped at the end of this function.
     state
         .db
         .apply_block(signed_block, notes, proving_inputs)

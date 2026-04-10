@@ -58,6 +58,8 @@ pub enum WitnessError {
     StorageMapError(#[from] StorageMapError),
     #[error("failed to construct asset")]
     AssetError(#[from] AssetError),
+    #[error("block {0} is unknown")]
+    UnknownBlock(BlockNumber),
 }
 
 // ACCOUNT STATE FOREST

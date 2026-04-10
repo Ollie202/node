@@ -87,6 +87,8 @@ pub enum DatabaseError {
     AccountsNotFoundInDb(Vec<AccountId>),
     #[error("account {0} is not on the chain")]
     AccountNotPublic(AccountId),
+    #[error("block {0} is unknown")]
+    UnknownBlock(BlockNumber),
     #[error("invalid block parameters: block_from ({from}) > block_to ({to})")]
     InvalidBlockRange { from: BlockNumber, to: BlockNumber },
     #[error("data corrupted: {0}")]
@@ -231,6 +233,9 @@ pub enum GetBlockHeaderError {
     #[error("error retrieving the merkle proof for the block")]
     #[grpc(internal)]
     MmrError(#[from] MmrError),
+    #[error("block {0} is unknown")]
+    #[grpc(invalid_argument)]
+    UnknownBlock(BlockNumber),
 }
 
 #[derive(Error, Debug)]

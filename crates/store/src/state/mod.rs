@@ -398,10 +398,16 @@ impl State {
         block_num: Option<BlockNumber>,
         include_mmr_proof: bool,
     ) -> Result<(Option<BlockHeader>, Option<MmrProof>), GetBlockHeaderError> {
-        let block_header = self.db.select_block_header_by_block_num(block_num).await?;
+        // Scope the DB query to the snapshot's block number to ensure consistency between
+        // the block header (from SQLite) and the MMR proof (from the snapshot).
+        let snapshot = self.snapshot();
+        let block_num = block_num.unwrap_or(snapshot.block_num);
+        if block_num > snapshot.block_num {
+            return Err(GetBlockHeaderError::UnknownBlock(block_num));
+        }
+        let block_header = self.db.select_block_header_by_block_num(Some(block_num)).await?;
         if let Some(header) = block_header {
             let mmr_proof = if include_mmr_proof {
-                let snapshot = self.snapshot();
                 let mmr_proof = snapshot.blockchain.open(header.block_num())?;
                 Some(mmr_proof)
             } else {
@@ -451,14 +457,14 @@ impl State {
             return Ok(None);
         }
 
-        // SAFETY: `select_block_header_by_block_num` will always return `Some(chain_tip_header)`
-        // when `None` is passed
+        // Scope the DB query to the snapshot's block number to ensure consistency between
+        // the block header (from SQLite) and the blockchain peaks (from the snapshot).
         let block_header: BlockHeader = self
             .db
-            .select_block_header_by_block_num(None)
+            .select_block_header_by_block_num(Some(snapshot.block_num))
             .await
             .map_err(GetCurrentBlockchainDataError::ErrorRetrievingBlockHeader)?
-            .unwrap();
+            .expect("block header for snapshot block number must exist in DB");
         let peaks = snapshot
             .blockchain
             .peaks_at(block_header.block_num())
@@ -1015,6 +1021,10 @@ impl State {
         block_num: BlockNumber,
         page: Page,
     ) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
+        let snapshot = self.snapshot();
+        if block_num > snapshot.block_num {
+            return Err(DatabaseError::UnknownBlock(block_num));
+        }
         self.db.select_unconsumed_network_notes(account_id, block_num, page).await
     }
 
@@ -1034,6 +1044,9 @@ impl State {
         vault_keys: BTreeSet<AssetVaultKey>,
     ) -> Result<Vec<AssetWitness>, WitnessError> {
         let snapshot = self.snapshot();
+        if block_num > snapshot.block_num {
+            return Err(WitnessError::UnknownBlock(block_num));
+        }
         let witnesses =
             snapshot.forest.get_vault_asset_witnesses(account_id, block_num, vault_keys)?;
         Ok(witnesses)
@@ -1052,6 +1065,9 @@ impl State {
         raw_key: StorageMapKey,
     ) -> Result<StorageMapWitness, WitnessError> {
         let snapshot = self.snapshot();
+        if block_num > snapshot.block_num {
+            return Err(WitnessError::UnknownBlock(block_num));
+        }
         let witness = snapshot
             .forest
             .get_storage_map_witness(account_id, slot_name, block_num, raw_key)?;
