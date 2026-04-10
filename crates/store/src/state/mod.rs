@@ -1,13 +1,13 @@
 //! State management for the Miden store.
 //!
 //! The [State] provides data access and modification methods. A single writer task, serialized by
-//! a channel, applies block mutations. In-memory structures (`account_tree`, `blockchain`,
-//! `forest`) are held in an [`Arc`] behind an [`ArcSwap`](arc_swap::ArcSwap), providing wait-free
-//! reads with no lock contention. The `RocksDB`-backed nullifier tree uses a lock-free
-//! [`WriterGuard`] because `RocksDB` MVCC provides snapshot isolation.
+//! a channel, applies block mutations. All reader-visible state (trees, blockchain MMR, forest) is
+//! held in an [`Arc<InMemoryState>`] behind an [`ArcSwap`](arc_swap::ArcSwap), providing wait-free
+//! reads with no lock contention.
 //!
 //! Readers obtain an `Arc<InMemoryState>` via [`State::snapshot()`] (wait-free, no locks).
-//! The writer clones the current state, mutates the clone, and atomically swaps the pointer.
+//! The writer applies mutations to its own writable trees (behind [`WriterGuard`]), then builds a
+//! new `InMemoryState` with snapshot-backed read-only copies and atomically swaps the pointer.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeInclusive;
@@ -126,6 +126,8 @@ pub struct TransactionInputs {
 pub(crate) struct InMemoryState {
     /// The committed block number for this snapshot.
     pub block_num: BlockNumber,
+    /// Nullifier tree (read-only, snapshot-backed).
+    pub nullifier_tree: NullifierTree<LargeSmt<SnapshotTreeStorage>>,
     /// Account tree with historical overlay support (read-only, snapshot-backed).
     pub account_tree: AccountTreeWithHistory<SnapshotTreeStorage>,
     /// Chain MMR (Merkle Mountain Range of block commitments).
@@ -139,9 +141,10 @@ pub(crate) struct InMemoryState {
 
 /// The rollup state.
 ///
-/// A single writer task (serialized by a channel) mutates the state. In-memory structures are
-/// held in an `Arc<InMemoryState>` behind an [`ArcSwap`], providing wait-free reads. The
-/// `RocksDB`-backed nullifier tree is lock-free via [`WriterGuard`].
+/// A single writer task (serialized by a channel) mutates the state. All trees, the blockchain
+/// MMR, and the forest are held in an `Arc<InMemoryState>` behind an [`ArcSwap`], providing
+/// wait-free reads. The writer keeps its own writable copies of the trees behind [`WriterGuard`]
+/// and creates snapshot-backed read-only copies for `InMemoryState` after each block.
 pub struct State {
     /// The database which stores block headers, nullifiers, notes, and the latest states of
     /// accounts.
@@ -150,30 +153,33 @@ pub struct State {
     /// The block store which stores full block contents for all blocks.
     pub(super) block_store: Arc<BlockStore>,
 
-    /// Nullifier tree — append-only, backed by `RocksDB`.
+    /// Writable nullifier tree — owned by the single writer task.
     ///
-    /// Lock-free via [`WriterGuard`]: `RocksDB` MVCC provides safe concurrent read access
-    /// during writes.
+    /// Writer-only via [`WriterGuard`]. Readers access the snapshot-backed copy in
+    /// `InMemoryState` instead.
     pub(super) nullifier_tree: WriterGuard<NullifierTree<LargeSmt<TreeStorage>>>,
 
     /// Writable account tree — owned by the single writer task.
     ///
-    /// Lock-free via [`WriterGuard`]: the writer applies mutations here, then creates
-    /// a snapshot-backed read-only copy for `InMemoryState`.
+    /// Writer-only via [`WriterGuard`]. Readers access the snapshot-backed copy in
+    /// `InMemoryState` instead.
     pub(super) account_tree: WriterGuard<AccountTreeWithHistory<TreeStorage>>,
 
-    /// Handle to the `RocksDB` database used for account tree storage.
-    ///
+    /// Handle to the RocksDB database used for account tree storage.
     /// Used to create snapshot storage instances for read-only snapshots in `InMemoryState`.
-    /// Stored as `Arc<DB>` obtained from `RocksDbStorage::db()`.
     #[cfg(feature = "rocksdb")]
     pub(super) account_db: std::sync::Arc<miden_large_smt_backend_rocksdb::DB>,
 
-    /// All in-memory state (account tree, blockchain MMR, forest) held atomically.
+    /// Handle to the RocksDB database used for nullifier tree storage.
+    /// Used to create snapshot storage instances for read-only snapshots in `InMemoryState`.
+    #[cfg(feature = "rocksdb")]
+    pub(super) nullifier_db: std::sync::Arc<miden_large_smt_backend_rocksdb::DB>,
+
+    /// All in-memory state held atomically behind an `ArcSwap`.
     ///
     /// Readers call `snapshot()` which returns `Arc<InMemoryState>` via a wait-free atomic
-    /// refcount bump — no data cloning. The writer deep-clones once per block, mutates the
-    /// copy, and atomically swaps via `ArcSwap::store()`.
+    /// refcount bump — no data cloning. The writer builds a new `InMemoryState` with
+    /// snapshot-backed trees after each block and atomically swaps via `ArcSwap::store()`.
     pub(super) in_memory: ArcSwap<InMemoryState>,
 
     /// Channel to the single writer task.
@@ -234,6 +240,11 @@ impl State {
             &storage_options.nullifier_tree.into(),
             NULLIFIER_TREE_STORAGE_DIR,
         )?;
+
+        // Grab the DB handle before loading (needed for creating snapshots).
+        #[cfg(feature = "rocksdb")]
+        let nullifier_db = std::sync::Arc::clone(nullifier_storage.db());
+
         let nullifier_tree = nullifier_storage.load_nullifier_tree(&mut db).await?;
 
         // Verify that tree roots match the expected roots from the database.
@@ -268,6 +279,24 @@ impl State {
             }
         };
 
+        // Create a snapshot-backed read-only nullifier tree for InMemoryState.
+        let snapshot_nullifier_tree = {
+            #[cfg(feature = "rocksdb")]
+            {
+                use miden_large_smt_backend_rocksdb::RocksDbSnapshotStorage;
+
+                let snapshot_storage =
+                    RocksDbSnapshotStorage::new(std::sync::Arc::clone(&nullifier_db));
+                let snapshot_smt = loader::load_smt(snapshot_storage)
+                    .map_err(|e| StateInitializationError::NullifierTreeIoError(e.to_string()))?;
+                NullifierTree::new_unchecked(snapshot_smt)
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            {
+                nullifier_tree.clone()
+            }
+        };
+
         let forest = load_smt_forest(&mut db, latest_block_num).await?;
 
         let db = Arc::new(db);
@@ -282,6 +311,7 @@ impl State {
 
         let in_memory = ArcSwap::from_pointee(InMemoryState {
             block_num: latest_block_num,
+            nullifier_tree: snapshot_nullifier_tree,
             account_tree: snapshot_account_tree,
             blockchain,
             forest,
@@ -294,6 +324,8 @@ impl State {
             account_tree: WriterGuard::new(account_tree_with_history),
             #[cfg(feature = "rocksdb")]
             account_db,
+            #[cfg(feature = "rocksdb")]
+            nullifier_db,
             in_memory,
             writer_tx,
             termination_ask,
@@ -400,10 +432,10 @@ impl State {
     /// Note: these proofs are invalidated once the nullifier tree is modified, i.e. on a new block.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret)]
     pub async fn check_nullifiers(&self, nullifiers: &[Nullifier]) -> Vec<SmtProof> {
-        let nullifier_tree = self.nullifier_tree.as_ref();
+        let snapshot = self.snapshot();
         nullifiers
             .iter()
-            .map(|n| nullifier_tree.open(n))
+            .map(|n| snapshot.nullifier_tree.open(n))
             .map(NullifierWitness::into_proof)
             .collect()
     }
@@ -637,49 +669,41 @@ impl State {
         ),
         GetBlockInputsError,
     > {
-        // Take a snapshot and extract everything we need, then drop it so readers of newer
-        // snapshots aren't held up by this Arc.
-        let (latest_block_number, partial_mmr, account_witnesses) = {
-            let snapshot = self.snapshot();
-            let latest_block_number = snapshot.block_num;
+        // Take a snapshot and extract everything we need from it.
+        let snapshot = self.snapshot();
+        let latest_block_number = snapshot.block_num;
 
-            // If `blocks` is empty, use the latest block number which will never trigger the error.
-            let highest_block_number = blocks.last().copied().unwrap_or(latest_block_number);
-            if highest_block_number > latest_block_number {
-                return Err(GetBlockInputsError::UnknownBatchBlockReference {
-                    highest_block_number,
-                    latest_block_number,
-                });
-            }
+        // If `blocks` is empty, use the latest block number which will never trigger the error.
+        let highest_block_number = blocks.last().copied().unwrap_or(latest_block_number);
+        if highest_block_number > latest_block_number {
+            return Err(GetBlockInputsError::UnknownBatchBlockReference {
+                highest_block_number,
+                latest_block_number,
+            });
+        }
 
-            // The latest block is not yet in the chain MMR, so we can't (and don't need to) prove
-            // its inclusion in the chain.
-            blocks.remove(&latest_block_number);
+        // The latest block is not yet in the chain MMR, so we can't (and don't need to) prove
+        // its inclusion in the chain.
+        blocks.remove(&latest_block_number);
 
-            let partial_mmr = snapshot
-                .blockchain
-                .partial_mmr_from_blocks(blocks, latest_block_number)
-                .expect(
-                    "latest block num should exist and all blocks in set should be < than latest block",
-                );
+        let partial_mmr =
+            snapshot.blockchain.partial_mmr_from_blocks(blocks, latest_block_number).expect(
+                "latest block num should exist and all blocks in set should be < than latest block",
+            );
 
-            // Fetch witnesses for all accounts.
-            let account_witnesses = account_ids
-                .iter()
-                .copied()
-                .map(|account_id| (account_id, snapshot.account_tree.open_latest(account_id)))
-                .collect::<BTreeMap<AccountId, AccountWitness>>();
-
-            (latest_block_number, partial_mmr, account_witnesses)
-        };
+        // Fetch witnesses for all accounts.
+        let account_witnesses = account_ids
+            .iter()
+            .copied()
+            .map(|account_id| (account_id, snapshot.account_tree.open_latest(account_id)))
+            .collect::<BTreeMap<AccountId, AccountWitness>>();
 
         // Fetch witnesses for all nullifiers. We don't check whether the nullifiers are spent or
         // not as this is done as part of proposing the block.
-        let nullifier_tree = self.nullifier_tree.as_ref();
         let nullifier_witnesses: BTreeMap<Nullifier, NullifierWitness> = nullifiers
             .iter()
             .copied()
-            .map(|nullifier| (nullifier, nullifier_tree.open(&nullifier)))
+            .map(|nullifier| (nullifier, snapshot.nullifier_tree.open(&nullifier)))
             .collect();
 
         Ok((latest_block_number, account_witnesses, nullifier_witnesses, partial_mmr))
@@ -697,23 +721,14 @@ impl State {
 
         // Take a snapshot and extract everything we need, then drop it so readers of newer
         // snapshots aren't held up by this Arc.
-        let (new_account_id_prefix_is_unique, account_commitment) = {
-            let snapshot = self.snapshot();
+        let snapshot = self.snapshot();
 
-            let account_commitment = snapshot.account_tree.get_latest_commitment(account_id);
+        let account_commitment = snapshot.account_tree.get_latest_commitment(account_id);
 
-            if account_commitment.is_empty() {
-                (
-                    Some(
-                        !snapshot
-                            .account_tree
-                            .contains_account_id_prefix_in_latest(account_id.prefix()),
-                    ),
-                    account_commitment,
-                )
-            } else {
-                (None, account_commitment)
-            }
+        let new_account_id_prefix_is_unique = if account_commitment.is_empty() {
+            Some(!snapshot.account_tree.contains_account_id_prefix_in_latest(account_id.prefix()))
+        } else {
+            None
         };
 
         // Non-unique account Id prefixes for new accounts are not allowed.
@@ -724,14 +739,16 @@ impl State {
             });
         }
 
-        let nullifier_tree = self.nullifier_tree.as_ref();
         let nullifiers = nullifiers
             .iter()
             .map(|nullifier| NullifierInfo {
                 nullifier: *nullifier,
-                block_num: nullifier_tree.get_block_num(nullifier).unwrap_or_default(),
+                block_num: snapshot.nullifier_tree.get_block_num(nullifier).unwrap_or_default(),
             })
             .collect();
+
+        // Drop snapshot before the async DB call.
+        drop(snapshot);
 
         let found_unauthenticated_notes = self
             .db

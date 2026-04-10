@@ -242,8 +242,31 @@ async fn apply_block_inner(
             .expect("Unreachable: mutations were computed from the current tree state");
     }
 
-    // Build a new read-only InMemoryState with a snapshot-backed account tree.
-    // The snapshot captures the RocksDB state after mutations have been applied.
+    // Build a new read-only InMemoryState with snapshot-backed trees.
+    // The snapshots capture the RocksDB state after mutations have been applied.
+    let snapshot_nullifier_tree = {
+        #[cfg(feature = "rocksdb")]
+        {
+            use miden_protocol::block::nullifier_tree::NullifierTree;
+
+            use crate::state::loader;
+
+            let snapshot_storage = miden_large_smt_backend_rocksdb::RocksDbSnapshotStorage::new(
+                std::sync::Arc::clone(&state.nullifier_db),
+            );
+            let snapshot_smt = loader::load_smt(snapshot_storage)
+                .expect("Unreachable: snapshot reads from data just written by apply_mutations");
+            NullifierTree::new_unchecked(snapshot_smt)
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            // In memory mode, clone the writable tree (which already has mutations applied).
+            // SAFETY: Single writer — safe to read from the writable tree.
+            let writable_tree = unsafe { state.nullifier_tree.as_mut() };
+            writable_tree.clone()
+        }
+    };
+
     let snapshot_account_tree = {
         #[cfg(feature = "rocksdb")]
         {
@@ -283,6 +306,7 @@ async fn apply_block_inner(
 
     let new_state = InMemoryState {
         block_num,
+        nullifier_tree: snapshot_nullifier_tree,
         account_tree: snapshot_account_tree,
         blockchain: new_blockchain,
         forest: new_forest,
