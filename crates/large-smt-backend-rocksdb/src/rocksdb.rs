@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -985,14 +986,20 @@ impl SmtStorage for RocksDbStorage {
 ///
 /// # Safety
 ///
-/// `snapshot` borrows from `db`. Fields are dropped in declaration order in Rust,
-/// so `snapshot` is dropped before `db`'s refcount is decremented. The `Arc<DB>`
-/// ensures the `DB` lives at least as long as any `SnapshotInner`.
+/// `snapshot` borrows from `db` so we must ensure that `snapshot` is dropped before `db`'s refcount
+/// is decremented. The `Arc<DB>` ensures the `DB` lives at least as long as any `SnapshotInner`.
 struct SnapshotInner {
-    // IMPORTANT: field order matters for drop order.
-    // `snapshot` must be declared before `db` so it is dropped first.
-    snapshot: rocksdb::Snapshot<'static>, // actually borrows from `db`
+    snapshot: ManuallyDrop<rocksdb::Snapshot<'static>>,
     db: Arc<DB>,
+}
+
+impl Drop for SnapshotInner {
+    fn drop(&mut self) {
+        // Ensure that the snapshot is dropped before the database reference count is decremented.
+        unsafe {
+            ManuallyDrop::drop(&mut self.snapshot);
+        }
+    }
 }
 
 /// A read-only, `Clone`-able RocksDB storage that reads from a point-in-time snapshot.
@@ -1027,7 +1034,10 @@ impl RocksDbSnapshotStorage {
         let snapshot = db_ref.snapshot();
         let snapshot: rocksdb::Snapshot<'static> = unsafe { std::mem::transmute(snapshot) };
         Self {
-            inner: Arc::new(SnapshotInner { snapshot, db }),
+            inner: Arc::new(SnapshotInner {
+                snapshot: ManuallyDrop::new(snapshot),
+                db,
+            }),
         }
     }
 
