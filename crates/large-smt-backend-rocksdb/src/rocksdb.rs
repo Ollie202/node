@@ -30,7 +30,13 @@ use super::{
     StorageUpdates,
     SubtreeUpdate,
 };
-use crate::helpers::{insert_into_leaf, map_rocksdb_err, remove_from_leaf};
+use crate::helpers::{
+    count_entries,
+    count_leaves,
+    insert_into_leaf,
+    map_rocksdb_err,
+    remove_from_leaf,
+};
 use crate::{EMPTY_WORD, Word};
 
 const IN_MEMORY_DEPTH: u8 = 24;
@@ -291,15 +297,7 @@ impl SmtStorageReader for RocksDbStorage {
         self.db
             .get_cf(cf, LEAF_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), |bytes| {
-                let arr: [u8; 8] =
-                    bytes.as_slice().try_into().map_err(|_| StorageError::BadValueLen {
-                        what: "leaf count",
-                        expected: 8,
-                        found: bytes.len(),
-                    })?;
-                Ok(usize::from_be_bytes(arr))
-            })
+            .map_or(Ok(0), count_leaves)
     }
 
     /// Retrieves the total count of key-value entries from the `METADATA_CF` column family.
@@ -314,15 +312,7 @@ impl SmtStorageReader for RocksDbStorage {
         self.db
             .get_cf(cf, ENTRY_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), |bytes| {
-                let arr: [u8; 8] =
-                    bytes.as_slice().try_into().map_err(|_| StorageError::BadValueLen {
-                        what: "entry count",
-                        expected: 8,
-                        found: bytes.len(),
-                    })?;
-                Ok(usize::from_be_bytes(arr))
-            })
+            .map_or(Ok(0), count_entries)
     }
 
     /// Retrieves a single SMT leaf node by its logical `index` from the `LEAVES_CF` column family.
@@ -1065,18 +1055,11 @@ impl RocksDbSnapshotStorage {
 impl SmtStorageReader for RocksDbSnapshotStorage {
     fn leaf_count(&self) -> Result<usize, StorageError> {
         let cf = self.cf_handle(METADATA_CF)?;
-        self.inner.snapshot.get_cf(cf, LEAF_COUNT_KEY).map_err(map_rocksdb_err)?.map_or(
-            Ok(0),
-            |bytes| {
-                let arr: [u8; 8] =
-                    bytes.as_slice().try_into().map_err(|_| StorageError::BadValueLen {
-                        what: "leaf count",
-                        expected: 8,
-                        found: bytes.len(),
-                    })?;
-                Ok(usize::from_be_bytes(arr))
-            },
-        )
+        self.inner
+            .snapshot
+            .get_cf(cf, LEAF_COUNT_KEY)
+            .map_err(map_rocksdb_err)?
+            .map_or(Ok(0), count_leaves)
     }
 
     fn entry_count(&self) -> Result<usize, StorageError> {
@@ -1085,15 +1068,7 @@ impl SmtStorageReader for RocksDbSnapshotStorage {
             .snapshot
             .get_cf(cf, ENTRY_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), |bytes| {
-                let arr: [u8; 8] =
-                    bytes.as_slice().try_into().map_err(|_| StorageError::BadValueLen {
-                        what: "entry count",
-                        expected: 8,
-                        found: bytes.len(),
-                    })?;
-                Ok(usize::from_be_bytes(arr))
-            })
+            .map_or(Ok(0), count_entries)
     }
 
     fn get_leaf(&self, index: u64) -> Result<Option<SmtLeaf>, StorageError> {

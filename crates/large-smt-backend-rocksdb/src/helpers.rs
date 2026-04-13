@@ -81,3 +81,25 @@ pub(crate) fn remove_from_leaf(leaf: &mut SmtLeaf, key: Word) -> (Option<Word>, 
         },
     }
 }
+
+#[expect(clippy::needless_pass_by_value, reason = "simplifies chaining")]
+pub(crate) fn count_leaves(leaf_count_bytes: Vec<u8>) -> Result<usize, StorageError> {
+    let arr: [u8; 8] =
+        leaf_count_bytes.as_slice().try_into().map_err(|_| StorageError::BadValueLen {
+            what: "leaf count",
+            expected: 8,
+            found: leaf_count_bytes.len(),
+        })?;
+    Ok(usize::from_be_bytes(arr))
+}
+
+#[expect(clippy::needless_pass_by_value, reason = "simplifies chaining")]
+pub(crate) fn count_entries(entry_count_bytes: Vec<u8>) -> Result<usize, StorageError> {
+    let arr: [u8; 8] =
+        entry_count_bytes.as_slice().try_into().map_err(|_| StorageError::BadValueLen {
+            what: "entry count",
+            expected: 8,
+            found: entry_count_bytes.len(),
+        })?;
+    Ok(usize::from_be_bytes(arr))
+}
