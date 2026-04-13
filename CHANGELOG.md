@@ -3,6 +3,7 @@
 ## v0.15.0 (TBD)
 
 - [BREAKING] Changed `GetBlockByNumber` to accept a `BlockRequest` (with optional `include_proof` flag) and returns a response containing the block and an optional block proof ([#1864](https://github.com/0xMiden/node/pull/1864)).
+- [BREAKING] Changed the `SyncTransactions` response to include the ids of notes that got erased due to being created and consumed on the same batch ([#1940](https://github.com/0xMiden/node/pull/1940)).
 
 ## v0.14.6 (2026-04-10)
 
