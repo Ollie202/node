@@ -984,10 +984,14 @@ impl SmtStorage for RocksDbStorage {
 
 /// Inner state shared by all clones of a snapshot storage.
 ///
+/// This struct pairs a RocksDB snapshot with an `Arc<DB>` to ensure the database
+/// lives for as long as the snapshot that references it. This allows for long-lived snapshots.
+///
 /// # Safety
 ///
-/// `snapshot` borrows from `db` so we must ensure that `snapshot` is dropped before `db`'s refcount
-/// is decremented. The `Arc<DB>` ensures the `DB` lives at least as long as any `SnapshotInner`.
+/// `snapshot` borrows from `db`, so `snapshot` must be dropped before `db`'s refcount
+/// is decremented. This is enforced by the `Drop` impl, which manually drops the
+/// snapshot before the compiler auto-drops the `Arc<DB>`.
 struct SnapshotInner {
     snapshot: ManuallyDrop<rocksdb::Snapshot<'static>>,
     db: Arc<DB>,
@@ -1021,17 +1025,10 @@ impl std::fmt::Debug for RocksDbSnapshotStorage {
 
 impl RocksDbSnapshotStorage {
     /// Creates a new snapshot storage from the given database.
-    ///
-    /// # Safety
-    ///
-    /// We use `Arc::as_ptr` to get a reference without borrowing `db`, allowing `db`
-    /// to be moved into `SnapshotInner`. The `Arc<DB>` stored alongside the snapshot
-    /// guarantees the DB outlives the snapshot (snapshot field is dropped before db field
-    /// due to declaration order).
     pub fn new(db: Arc<DB>) -> Self {
-        // SAFETY: See struct-level safety documentation.
-        let db_ref: &DB = unsafe { &*Arc::as_ptr(&db) };
-        let snapshot = db_ref.snapshot();
+        // SAFETY: We can transmute the snapshot to a static lifetime because we know that
+        // the database will outlive the snapshot.
+        let snapshot = db.snapshot();
         let snapshot: rocksdb::Snapshot<'static> = unsafe { std::mem::transmute(snapshot) };
         Self {
             inner: Arc::new(SnapshotInner {
