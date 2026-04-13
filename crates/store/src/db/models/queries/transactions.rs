@@ -322,16 +322,19 @@ fn with_output_note_proofs(
         .zip(tx_output_notes)
         .map(|(raw, output_notes)| {
             let transaction_id = TransactionId::read_from_bytes(&raw.transaction_id)?;
-            // Filter out erased notes: notes created and consumed within the same
-            // block are removed from the block's output notes and thus have no entry
-            // in the `notes` table.
-            let enriched_notes = output_notes
-                .into_iter()
-                .filter_map(|note| {
-                    let note_id = note.id();
-                    output_notes_by_id.get(&note_id).cloned()
-                })
-                .collect::<Vec<_>>();
+            // Separate output notes into committed (found on node) and erased (not found).
+            // Erased notes were created and consumed within the same batch, so they have
+            // no entry in the `notes` table.
+            let mut enriched_notes = Vec::new();
+            let mut erased_note_ids = Vec::new();
+            for note in output_notes {
+                let note_id = note.id();
+                if let Some(record) = output_notes_by_id.get(&note_id) {
+                    enriched_notes.push(record.clone());
+                } else {
+                    erased_note_ids.push(note_id);
+                }
+            }
 
             Ok(crate::db::TransactionRecord {
                 account_id: AccountId::read_from_bytes(&raw.account_id)?,
@@ -341,6 +344,7 @@ fn with_output_note_proofs(
                 final_state_commitment: Word::read_from_bytes(&raw.final_state_commitment)?,
                 input_notes: Deserializable::read_from_bytes(&raw.input_notes)?,
                 output_notes: enriched_notes,
+                erased_output_note_ids: erased_note_ids,
                 fee: FungibleAsset::read_from_bytes(&raw.fee)?,
             })
         })

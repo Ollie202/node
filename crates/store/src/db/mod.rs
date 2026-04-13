@@ -144,6 +144,7 @@ pub struct TransactionRecord {
     pub final_state_commitment: Word,
     pub input_notes: Vec<InputNoteCommitment>,
     pub output_notes: Vec<NoteSyncRecord>,
+    pub erased_output_note_ids: Vec<NoteId>,
     pub fee: FungibleAsset,
 }
 
@@ -153,6 +154,24 @@ impl TransactionRecord {
     /// The proto `TransactionHeader` mirrors the stored transaction data, except output notes are
     /// enriched with inclusion proofs for sync clients.
     pub fn into_proto(self) -> proto::rpc::TransactionRecord {
+        let mut output_notes: Vec<proto::transaction::OutputNoteRecord> = self
+            .output_notes
+            .into_iter()
+            .map(|note| proto::transaction::OutputNoteRecord {
+                record: Some(proto::transaction::output_note_record::Record::Committed(
+                    note.into(),
+                )),
+            })
+            .collect();
+
+        output_notes.extend(self.erased_output_note_ids.iter().map(|note_id| {
+            proto::transaction::OutputNoteRecord {
+                record: Some(proto::transaction::output_note_record::Record::Erased(
+                    note_id.into(),
+                )),
+            }
+        }));
+
         proto::rpc::TransactionRecord {
             header: Some(proto::transaction::TransactionHeader {
                 transaction_id: Some(self.transaction_id.into()),
@@ -160,7 +179,7 @@ impl TransactionRecord {
                 initial_state_commitment: Some(self.initial_state_commitment.into()),
                 final_state_commitment: Some(self.final_state_commitment.into()),
                 input_notes: self.input_notes.into_iter().map(Into::into).collect(),
-                output_notes: self.output_notes.into_iter().map(Into::into).collect(),
+                output_notes,
                 fee: Some(Asset::from(self.fee).into()),
             }),
             block_num: self.block_num.as_u32(),
