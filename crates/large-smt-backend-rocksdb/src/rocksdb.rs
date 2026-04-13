@@ -31,10 +31,11 @@ use super::{
     SubtreeUpdate,
 };
 use crate::helpers::{
-    count_entries,
-    count_leaves,
     insert_into_leaf,
     map_rocksdb_err,
+    read_entry_count,
+    read_leaf,
+    read_leaf_count,
     remove_from_leaf,
 };
 use crate::{EMPTY_WORD, Word};
@@ -297,7 +298,7 @@ impl SmtStorageReader for RocksDbStorage {
         self.db
             .get_cf(cf, LEAF_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), count_leaves)
+            .map_or(Ok(0), read_leaf_count)
     }
 
     /// Retrieves the total count of key-value entries from the `METADATA_CF` column family.
@@ -312,7 +313,7 @@ impl SmtStorageReader for RocksDbStorage {
         self.db
             .get_cf(cf, ENTRY_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), count_entries)
+            .map_or(Ok(0), read_entry_count)
     }
 
     /// Retrieves a single SMT leaf node by its logical `index` from the `LEAVES_CF` column family.
@@ -323,13 +324,7 @@ impl SmtStorageReader for RocksDbStorage {
     fn get_leaf(&self, index: u64) -> Result<Option<SmtLeaf>, StorageError> {
         let cf = self.cf_handle(LEAVES_CF)?;
         let key = Self::index_db_key(index);
-        match self.db.get_cf(cf, key).map_err(map_rocksdb_err)? {
-            Some(bytes) => {
-                let leaf = SmtLeaf::read_from_bytes(&bytes)?;
-                Ok(Some(leaf))
-            },
-            None => Ok(None),
-        }
+        self.db.get_cf(cf, key).map_err(map_rocksdb_err)?.map_or(Ok(None), read_leaf)
     }
 
     /// Retrieves multiple SMT leaf nodes by their logical `indices` using RocksDB's `multi_get_cf`.
@@ -1059,7 +1054,7 @@ impl SmtStorageReader for RocksDbSnapshotStorage {
             .snapshot
             .get_cf(cf, LEAF_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), count_leaves)
+            .map_or(Ok(0), read_leaf_count)
     }
 
     fn entry_count(&self) -> Result<usize, StorageError> {
@@ -1068,19 +1063,17 @@ impl SmtStorageReader for RocksDbSnapshotStorage {
             .snapshot
             .get_cf(cf, ENTRY_COUNT_KEY)
             .map_err(map_rocksdb_err)?
-            .map_or(Ok(0), count_entries)
+            .map_or(Ok(0), read_entry_count)
     }
 
     fn get_leaf(&self, index: u64) -> Result<Option<SmtLeaf>, StorageError> {
         let cf = self.cf_handle(LEAVES_CF)?;
         let key = RocksDbStorage::index_db_key(index);
-        match self.inner.snapshot.get_cf(cf, key).map_err(map_rocksdb_err)? {
-            Some(bytes) => {
-                let leaf = SmtLeaf::read_from_bytes(&bytes)?;
-                Ok(Some(leaf))
-            },
-            None => Ok(None),
-        }
+        self.inner
+            .snapshot
+            .get_cf(cf, key)
+            .map_err(map_rocksdb_err)?
+            .map_or(Ok(None), read_leaf)
     }
 
     fn get_leaves(&self, indices: &[u64]) -> Result<Vec<Option<SmtLeaf>>, StorageError> {
