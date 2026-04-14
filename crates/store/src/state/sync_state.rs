@@ -7,7 +7,7 @@ use miden_protocol::block::{BlockHeader, BlockNumber};
 use miden_protocol::crypto::merkle::mmr::{Forest, MmrDelta, MmrProof};
 use tracing::instrument;
 
-use super::State;
+use super::{Scoped, State};
 use crate::COMPONENT;
 use crate::db::models::queries::StorageMapValuesPage;
 use crate::db::{AccountVaultValue, NoteSyncUpdate, NullifierInfo};
@@ -34,8 +34,16 @@ impl State {
         &self,
         account_ids: Vec<AccountId>,
         block_range: RangeInclusive<BlockNumber>,
-    ) -> Result<(BlockNumber, Vec<crate::db::TransactionRecord>), DatabaseError> {
-        self.db.select_transactions_records(account_ids, block_range).await
+    ) -> Result<Scoped<(BlockNumber, Vec<crate::db::TransactionRecord>)>, DatabaseError> {
+        let snapshot = self.snapshot();
+        let chain_tip = snapshot.block_num;
+        let block_to = *block_range.end();
+        if block_to > chain_tip {
+            return Err(DatabaseError::UnknownBlock(block_to));
+        }
+        let (last_block_included, transactions) =
+            self.db.select_transactions_records(account_ids, block_range).await?;
+        Ok(Scoped::new(chain_tip, (last_block_included, transactions)))
     }
 
     /// Returns the chain MMR delta and the `block_to` block header for the specified block range.
@@ -97,12 +105,13 @@ impl State {
     ///
     /// Also returns the last block number checked. If this equals `block_range.end()`, the
     /// sync is complete.
+    #[expect(clippy::type_complexity)]
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn sync_notes(
         &self,
         note_tags: Vec<u32>,
         block_range: RangeInclusive<BlockNumber>,
-    ) -> Result<(Vec<(NoteSyncUpdate, MmrProof)>, BlockNumber, BlockNumber), NoteSyncError> {
+    ) -> Result<Scoped<(Vec<(NoteSyncUpdate, MmrProof)>, BlockNumber)>, NoteSyncError> {
         // Ensure the requested block range is within the chain's current tip.
         let snapshot = self.snapshot();
         let chain_tip = snapshot.block_num;
@@ -146,7 +155,7 @@ impl State {
         let last_block_checked =
             results.last().map_or(block_end, |(update, _)| update.block_header.block_num());
 
-        Ok((results, last_block_checked, chain_tip))
+        Ok(Scoped::new(chain_tip, (results, last_block_checked)))
     }
 
     /// Returns nullifiers matching the given prefixes within the block range.
@@ -158,7 +167,7 @@ impl State {
         prefix_len: u32,
         nullifier_prefixes: Vec<u32>,
         block_range: RangeInclusive<BlockNumber>,
-    ) -> Result<(Vec<NullifierInfo>, BlockNumber, BlockNumber), DatabaseError> {
+    ) -> Result<Scoped<(Vec<NullifierInfo>, BlockNumber)>, DatabaseError> {
         // Ensure the db query is scoped by the snapshot's chain tip.
         let chain_tip = self.snapshot().block_num;
         if block_range.end() > &chain_tip {
@@ -170,7 +179,7 @@ impl State {
             .select_nullifiers_by_prefix(prefix_len, nullifier_prefixes, block_range)
             .await?;
 
-        Ok((nullifiers, block_num, chain_tip))
+        Ok(Scoped::new(chain_tip, (nullifiers, block_num)))
     }
 
     // ACCOUNT STATE SYNCHRONIZATION
@@ -182,7 +191,7 @@ impl State {
         &self,
         account_id: AccountId,
         block_range: RangeInclusive<BlockNumber>,
-    ) -> Result<(BlockNumber, Vec<AccountVaultValue>, BlockNumber), DatabaseError> {
+    ) -> Result<Scoped<(BlockNumber, Vec<AccountVaultValue>)>, DatabaseError> {
         // Ensure the db query is scoped by the snapshot's chain tip.
         let chain_tip = self.snapshot().block_num;
         if block_range.end() > &chain_tip {
@@ -190,7 +199,7 @@ impl State {
         }
         let (last_included_block, vault_updates) =
             self.db.get_account_vault_sync(account_id, block_range).await?;
-        Ok((last_included_block, vault_updates, chain_tip))
+        Ok(Scoped::new(chain_tip, (last_included_block, vault_updates)))
     }
 
     /// Returns storage map values for syncing within a block range including the chain tip.
@@ -198,7 +207,7 @@ impl State {
         &self,
         account_id: AccountId,
         block_range: RangeInclusive<BlockNumber>,
-    ) -> Result<(StorageMapValuesPage, BlockNumber), DatabaseError> {
+    ) -> Result<Scoped<StorageMapValuesPage>, DatabaseError> {
         // Ensure the db query is scoped by the snapshot's chain tip.
         let chain_tip = self.snapshot().block_num;
         if block_range.end() > &chain_tip {
@@ -206,6 +215,6 @@ impl State {
         }
         let storage_map_values =
             self.db.select_storage_map_sync_values(account_id, block_range, None).await?;
-        Ok((storage_map_values, chain_tip))
+        Ok(Scoped::new(chain_tip, storage_map_values))
     }
 }

@@ -184,12 +184,14 @@ impl block_producer_server::BlockProducer for StoreApi {
         let unauthenticated_note_commitments =
             validate_note_commitments(&request.unauthenticated_notes)?;
 
-        let (tx_inputs, block_height) = self
+        let result = self
             .state
             .get_transaction_inputs(account_id, &nullifiers, unauthenticated_note_commitments)
             .await
             .inspect_err(|err| tracing::Span::current().set_error(err))
             .map_err(|err| tonic::Status::internal(err.as_report()))?;
+        let block_height = result.chain_tip();
+        let tx_inputs = result.inner;
 
         Ok(Response::new(proto::store::TransactionInputs {
             account_state: Some(proto::store::transaction_inputs::AccountTransactionInputRecord {

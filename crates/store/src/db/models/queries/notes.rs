@@ -315,36 +315,12 @@ pub(crate) fn select_all_notes(
     Ok(records)
 }
 
-/// Select note inclusion proofs matching the note commitments.
-///
-/// # Parameters
-/// * `note_ids`: Set of note IDs to query
-///     - Limit: 0 <= count <= 1000
-///
-/// # Returns
-///
-/// - Empty map if no matching `note`.
-/// - Otherwise, note inclusion proofs, which `note_id` matches the `NoteId` as bytes.
-///
-/// # Raw SQL
-///
-/// ```sql
-/// SELECT
-///     committed_at,
-///     note_id,
-///     batch_index,
-///     note_index,
-///     inclusion_path
-/// FROM
-///     notes
-/// WHERE
-///     note_id IN (?1)
-/// ORDER BY
-///     committed_at ASC
-/// ```
+/// Select note inclusion proofs for notes matching the given commitments, scoped to notes
+/// committed at or before the given block number.
 pub(crate) fn select_note_inclusion_proofs(
     conn: &mut SqliteConnection,
     note_commitments: &BTreeSet<Word>,
+    block_num: BlockNumber,
 ) -> Result<BTreeMap<NoteId, NoteInclusionProof>, DatabaseError> {
     QueryParamNoteCommitmentLimit::check(note_commitments.len())?;
 
@@ -361,6 +337,7 @@ pub(crate) fn select_note_inclusion_proofs(
         ),
     )
     .filter(schema::notes::note_commitment.eq_any(note_commitments))
+    .filter(schema::notes::committed_at.le(block_num.to_raw_sql()))
     .order_by(schema::notes::committed_at.asc())
     .load::<(i64, Vec<u8>, i32, i32, Vec<u8>)>(conn)?;
 

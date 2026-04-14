@@ -99,11 +99,13 @@ impl rpc_server::Rpc for StoreApi {
             read_block_range::<SyncNullifiersError>(request.block_range, "SyncNullifiersRequest")?
                 .into_inclusive_range::<SyncNullifiersError>(&chain_tip)?;
 
-        let (nullifiers, block_num, chain_tip) = self
+        let result = self
             .state
             .sync_nullifiers(request.prefix_len, request.nullifiers, block_range)
             .await
             .map_err(SyncNullifiersError::from)?;
+        let chain_tip = result.chain_tip();
+        let (nullifiers, block_num) = result.inner;
 
         let nullifiers = nullifiers
             .into_iter()
@@ -137,8 +139,9 @@ impl rpc_server::Rpc for StoreApi {
         // Validate note tags count
         check::<QueryParamNoteTagLimit>(request.note_tags.len())?;
 
-        let (results, last_block_checked, chain_tip) =
-            self.state.sync_notes(request.note_tags, block_range).await?;
+        let result = self.state.sync_notes(request.note_tags, block_range).await?;
+        let chain_tip = result.chain_tip();
+        let (results, last_block_checked) = result.inner;
 
         let blocks = results
             .into_iter()
@@ -293,11 +296,13 @@ impl rpc_server::Rpc for StoreApi {
         )?
         .into_inclusive_range::<SyncAccountVaultError>(&chain_tip)?;
 
-        let (last_included_block, updates, chain_tip) = self
+        let result = self
             .state
             .sync_account_vault(account_id, block_range)
             .await
             .map_err(SyncAccountVaultError::from)?;
+        let chain_tip = result.chain_tip();
+        let (last_included_block, updates) = result.inner;
 
         let updates = updates
             .into_iter()
@@ -345,11 +350,13 @@ impl rpc_server::Rpc for StoreApi {
         )?
         .into_inclusive_range::<SyncAccountStorageMapsError>(&chain_tip)?;
 
-        let (storage_maps_page, chain_tip) = self
+        let result = self
             .state
             .sync_account_storage_maps(account_id, block_range)
             .await
             .map_err(SyncAccountStorageMapsError::from)?;
+        let chain_tip = result.chain_tip();
+        let storage_maps_page = result.inner;
 
         let updates = storage_maps_page
             .values
@@ -423,11 +430,13 @@ impl rpc_server::Rpc for StoreApi {
         // Validate account IDs count
         check::<QueryParamAccountIdLimit>(account_ids.len())?;
 
-        let (last_block_included, transaction_records_db) = self
+        let result = self
             .state
             .sync_transactions(account_ids, block_range.clone())
             .await
             .map_err(SyncTransactionsError::from)?;
+        let chain_tip = result.chain_tip();
+        let (last_block_included, transaction_records_db) = result.inner;
 
         // Convert database TransactionRecords directly to proto TransactionRecords.
         // All data needed for the proto TransactionHeader is stored in the transactions table.

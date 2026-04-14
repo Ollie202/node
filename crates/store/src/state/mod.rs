@@ -102,6 +102,33 @@ pub struct TransactionInputs {
     pub new_account_id_prefix_is_unique: Option<bool>,
 }
 
+// SCOPED RESULT
+// ================================================================================================
+
+/// A query result scoped to a specific chain tip.
+///
+/// Wraps an inner value `T` with the [`BlockNumber`] of the snapshot that was used to produce it.
+/// This ensures callers always know which block the data corresponds to.
+#[derive(Debug)]
+pub struct Scoped<T> {
+    /// The chain tip at the time the query was executed.
+    chain_tip: BlockNumber,
+    /// The query result.
+    pub inner: T,
+}
+
+impl<T> Scoped<T> {
+    /// Creates a new scoped result.
+    pub fn new(chain_tip: BlockNumber, inner: T) -> Self {
+        Self { chain_tip, inner }
+    }
+
+    /// Returns the chain tip at the time the query was executed.
+    pub fn chain_tip(&self) -> BlockNumber {
+        self.chain_tip
+    }
+}
+
 // IN-MEMORY STATE
 // ================================================================================================
 
@@ -477,8 +504,6 @@ impl State {
             return Ok(None);
         }
 
-        // Scope the DB query to the snapshot's block number to ensure consistency between
-        // the block header (from SQLite) and the blockchain peaks (from the snapshot).
         let block_header: BlockHeader = self
             .db
             .select_block_header_by_block_num(Some(snapshot.block_num))
@@ -520,12 +545,15 @@ impl State {
             return Err(GetBatchInputsError::TransactionBlockReferencesEmpty);
         }
 
+        let snapshot = self.snapshot();
+        let latest_block_num = snapshot.block_num;
+
         // First we grab note inclusion proofs for the known notes. These proofs only
         // prove that the note was included in a given block. We then also need to prove that
         // each of those blocks is included in the chain.
         let note_proofs = self
             .db
-            .select_note_inclusion_proofs(unauthenticated_note_commitments)
+            .select_note_inclusion_proofs(unauthenticated_note_commitments, latest_block_num)
             .await
             .map_err(GetBatchInputsError::SelectNoteInclusionProofError)?;
 
@@ -537,9 +565,6 @@ impl State {
         // - all blocks referenced by transactions in the batch.
         let mut blocks: BTreeSet<BlockNumber> = tx_reference_blocks;
         blocks.extend(note_blocks);
-
-        let snapshot = self.snapshot();
-        let latest_block_num = snapshot.block_num;
 
         let highest_block_num =
             *blocks.last().expect("we should have checked for empty block references");
@@ -613,10 +638,13 @@ impl State {
         unauthenticated_note_commitments: BTreeSet<Word>,
         reference_blocks: BTreeSet<BlockNumber>,
     ) -> Result<BlockInputs, GetBlockInputsError> {
+        let snapshot = self.snapshot();
+        let latest_block_number = snapshot.block_num;
+
         // Get the note inclusion proofs from the DB.
         let unauthenticated_note_proofs = self
             .db
-            .select_note_inclusion_proofs(unauthenticated_note_commitments)
+            .select_note_inclusion_proofs(unauthenticated_note_commitments, snapshot.block_num)
             .await
             .map_err(GetBlockInputsError::SelectNoteInclusionProofError)?;
 
@@ -628,8 +656,8 @@ impl State {
         let mut blocks = reference_blocks;
         blocks.extend(note_proof_reference_blocks);
 
-        let (latest_block_number, account_witnesses, nullifier_witnesses, partial_mmr) =
-            self.get_block_inputs_witnesses(&mut blocks, &account_ids, &nullifiers)?;
+        let (account_witnesses, nullifier_witnesses, partial_mmr) =
+            Self::get_block_inputs_witnesses(&snapshot, &mut blocks, &account_ids, &nullifiers)?;
 
         // Fetch the block headers for all blocks in the partial MMR plus the latest one which will
         // be used as the previous block header of the block being built.
@@ -669,21 +697,18 @@ impl State {
     /// number is removed from `blocks` and returned separately.
     #[expect(clippy::type_complexity)]
     fn get_block_inputs_witnesses(
-        &self,
+        snapshot: &Arc<InMemoryState>,
         blocks: &mut BTreeSet<BlockNumber>,
         account_ids: &[AccountId],
         nullifiers: &[Nullifier],
     ) -> Result<
         (
-            BlockNumber,
             BTreeMap<AccountId, AccountWitness>,
             BTreeMap<Nullifier, NullifierWitness>,
             PartialMmr,
         ),
         GetBlockInputsError,
     > {
-        // Take a snapshot and extract everything we need from it.
-        let snapshot = self.snapshot();
         let latest_block_number = snapshot.block_num;
 
         // If `blocks` is empty, use the latest block number which will never trigger the error.
@@ -719,7 +744,7 @@ impl State {
             .map(|nullifier| (nullifier, snapshot.nullifier_tree.open(&nullifier)))
             .collect();
 
-        Ok((latest_block_number, account_witnesses, nullifier_witnesses, partial_mmr))
+        Ok((account_witnesses, nullifier_witnesses, partial_mmr))
     }
 
     /// Returns data needed by the block producer to verify transactions validity and the
@@ -730,7 +755,7 @@ impl State {
         account_id: AccountId,
         nullifiers: &[Nullifier],
         unauthenticated_note_commitments: Vec<Word>,
-    ) -> Result<(TransactionInputs, BlockNumber), DatabaseError> {
+    ) -> Result<Scoped<TransactionInputs>, DatabaseError> {
         info!(target: COMPONENT, account_id = %account_id.to_string(), nullifiers = %format_array(nullifiers));
 
         // Take a snapshot and extract everything we need, then drop it so readers of newer
@@ -748,12 +773,12 @@ impl State {
 
         // Non-unique account Id prefixes for new accounts are not allowed.
         if let Some(false) = new_account_id_prefix_is_unique {
-            return Ok((
+            return Ok(Scoped::new(
+                block_height,
                 TransactionInputs {
                     new_account_id_prefix_is_unique,
                     ..Default::default()
                 },
-                block_height,
             ));
         }
 
@@ -773,14 +798,14 @@ impl State {
             .select_existing_note_commitments(unauthenticated_note_commitments, block_height)
             .await?;
 
-        Ok((
+        Ok(Scoped::new(
+            block_height,
             TransactionInputs {
                 account_commitment,
                 nullifiers,
                 found_unauthenticated_notes,
                 new_account_id_prefix_is_unique,
             },
-            block_height,
         ))
     }
 
@@ -903,6 +928,10 @@ impl State {
 
         if !account_id.has_public_state() {
             return Err(GetAccountError::AccountNotPublic(account_id));
+        }
+
+        if block_num > snapshot.block_num {
+            return Err(GetAccountError::UnknownBlock(block_num));
         }
 
         // Query account header and storage header together in a single DB call

@@ -517,14 +517,16 @@ impl Db {
         .await
     }
 
-    /// Loads inclusion proofs for notes matching the given note commitments.
+    /// Loads inclusion proofs for notes matching the given note commitments, scoped to notes
+    /// committed at or before the given block number.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn select_note_inclusion_proofs(
         &self,
         note_commitments: BTreeSet<Word>,
+        block_num: BlockNumber,
     ) -> Result<BTreeMap<NoteId, NoteInclusionProof>> {
         self.transact("block note inclusion proofs by commitment", move |conn| {
-            models::queries::select_note_inclusion_proofs(conn, &note_commitments)
+            models::queries::select_note_inclusion_proofs(conn, &note_commitments, block_num)
         })
         .await
     }
