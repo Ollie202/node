@@ -503,14 +503,16 @@ impl Db {
         .await
     }
 
-    /// Returns all note commitments from the DB that match the provided ones.
+    /// Returns all note commitments from the DB that match the provided ones, scoped to notes
+    /// committed at or before the given block number.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn select_existing_note_commitments(
         &self,
         note_commitments: Vec<Word>,
+        block_num: BlockNumber,
     ) -> Result<HashSet<Word>> {
         self.transact("note by commitment", move |conn| {
-            queries::select_existing_note_commitments(conn, note_commitments.as_slice())
+            queries::select_existing_note_commitments(conn, note_commitments.as_slice(), block_num)
         })
         .await
     }

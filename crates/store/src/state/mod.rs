@@ -749,7 +749,7 @@ impl State {
 
         let found_unauthenticated_notes = self
             .db
-            .select_existing_note_commitments(unauthenticated_note_commitments)
+            .select_existing_note_commitments(unauthenticated_note_commitments, block_height)
             .await?;
 
         Ok((
