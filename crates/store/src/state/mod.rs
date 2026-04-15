@@ -835,10 +835,10 @@ impl State {
     ) -> Result<Scoped<(Vec<AccountId>, BlockNumber)>, DatabaseError> {
         let snapshot = self.snapshot();
         let chain_tip = snapshot.block_num;
-        let block_to = block_range.end();
-        if block_to > &chain_tip {
-            return Err(DatabaseError::UnknownBlock(*block_to));
-        }
+        // Clamp the upper bound to the chain tip so callers can use BlockNumber::MAX to mean
+        // "up to the latest block".
+        let clamped_end = std::cmp::min(*block_range.end(), chain_tip);
+        let block_range = *block_range.start()..=clamped_end;
         let result = self.db.select_all_network_account_ids(block_range).await?;
         Ok(Scoped::new(chain_tip, result))
     }
