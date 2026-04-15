@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.14.7 (TBD)
+## v0.14.7 (2026-04-15)
 
 - [BREAKING] Aligned proto `TransactionHeader` with domain type and exposed erased notes in `SyncTransactions` ([#1941](https://github.com/0xMiden/node/pull/1941)).
 
