@@ -1083,9 +1083,7 @@ impl State {
         page: Page,
     ) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
         let snapshot = self.snapshot();
-        if block_num > snapshot.block_num {
-            return Err(DatabaseError::UnknownBlock(block_num));
-        }
+        let block_num = std::cmp::min(block_num, snapshot.block_num);
         self.db.select_unconsumed_network_notes(account_id, block_num, page).await
     }
 
