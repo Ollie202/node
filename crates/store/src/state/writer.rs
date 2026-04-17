@@ -133,33 +133,37 @@ impl BlockWriter {
         // Load the current in-memory state snapshot for validation (wait-free).
         let snapshot = self.in_memory.load_full();
 
-        // Compute mutations required for updating account and nullifier trees.
-        let (nullifier_tree_update, account_tree_update) =
-            self.compute_tree_mutations(&snapshot, header, body)?;
+        // Tree mutation, RocksDB writes, and snapshot construction are all CPU- and I/O-bound
+        // synchronous workloads. Run them inside block_in_place so tokio can evacuate other tasks
+        // from this thread for the duration.
+        let (snapshot_nullifier_tree, snapshot_account_tree, notes, account_deltas) =
+            tokio::task::block_in_place(|| -> Result<_, ApplyBlockError> {
+                let (nullifier_tree_update, account_tree_update) =
+                    self.compute_tree_mutations(&snapshot, header, body)?;
 
-        let notes = build_note_records(header, body)?;
+                let notes = build_note_records(header, body)?;
 
-        // Extract public account deltas before block is moved into the DB task.
-        let account_deltas =
-            Vec::from_iter(body.updated_accounts().iter().filter_map(
-                |update| match update.details() {
-                    AccountUpdateDetails::Delta(delta) => Some(delta.clone()),
-                    AccountUpdateDetails::Private => None,
-                },
-            ));
+                let account_deltas =
+                    Vec::from_iter(body.updated_accounts().iter().filter_map(|update| {
+                        match update.details() {
+                            AccountUpdateDetails::Delta(delta) => Some(delta.clone()),
+                            AccountUpdateDetails::Private => None,
+                        }
+                    }));
 
-        // Apply mutations to the writable trees (writes to RocksDB).
-        self.nullifier_tree
-            .apply_mutations(nullifier_tree_update)
-            .expect("Unreachable: mutations were computed from the current tree state");
+                self.nullifier_tree
+                    .apply_mutations(nullifier_tree_update)
+                    .expect("Unreachable: mutations were computed from the current tree state");
 
-        self.account_tree
-            .apply_mutations(account_tree_update)
-            .expect("Unreachable: mutations were computed from the current tree state");
+                self.account_tree
+                    .apply_mutations(account_tree_update)
+                    .expect("Unreachable: mutations were computed from the current tree state");
 
-        // Build new read-only snapshot-backed trees for the new in-memory state.
-        let snapshot_nullifier_tree = self.build_snapshot_nullifier_tree();
-        let snapshot_account_tree = self.build_snapshot_account_tree();
+                let snapshot_nullifier_tree = self.build_snapshot_nullifier_tree();
+                let snapshot_account_tree = self.build_snapshot_account_tree();
+
+                Ok((snapshot_nullifier_tree, snapshot_account_tree, notes, account_deltas))
+            })?;
 
         let mut new_blockchain = snapshot.blockchain.clone();
         new_blockchain.push(block_commitment);
