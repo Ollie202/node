@@ -31,6 +31,7 @@ services:
     environment:
       - MIDEN_NODE_ENABLE_OTEL=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=store
     command:
       - miden-node
       - store
@@ -56,6 +57,7 @@ services:
     environment:
       - MIDEN_NODE_ENABLE_OTEL=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=validator
     command:
       - miden-node
       - validator
@@ -71,6 +73,7 @@ services:
     environment:
       - MIDEN_NODE_ENABLE_OTEL=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=block-producer
     command:
       - miden-node
       - block-producer
@@ -87,6 +90,7 @@ services:
     environment:
       - MIDEN_NODE_ENABLE_OTEL=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=rpc
     command:
       - miden-node
       - rpc
@@ -106,6 +110,7 @@ services:
     environment:
       - MIDEN_NODE_ENABLE_OTEL=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=ntx-builder
     command:
       - miden-node
       - ntx-builder
@@ -152,6 +157,7 @@ services:
       - MIDEN_MONITOR_DISABLE_NTX_SERVICE=true
       - MIDEN_MONITOR_ENABLE_OTEL=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=monitor
     ports:
       - "3001:3001"
 
