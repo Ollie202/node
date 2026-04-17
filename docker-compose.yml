@@ -121,7 +121,7 @@ services:
       - --data-directory=/data
 
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.10.4
     volumes:
       - ./compose/tempo/tempo.yaml:/etc/tempo.yaml
     command: ["-config.file=/etc/tempo.yaml"]
@@ -130,7 +130,7 @@ services:
       - "4317:4317"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.4
     volumes:
       - ./compose/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
       - ./compose/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
