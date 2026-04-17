@@ -17,3 +17,15 @@ storage:
       path: /var/tempo/traces
     wal:
       path: /var/tempo/wal
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/metrics/wal
+  traces_storage:
+    path: /var/tempo/metrics/traces
+
+overrides:
+  metrics_generator_processors: [service-graphs, span-metrics, local-blocks] # enables metrics generator
