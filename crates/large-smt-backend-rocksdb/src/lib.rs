@@ -63,3 +63,10 @@ pub use miden_protocol::{
 };
 pub use rocksdb::{RocksDbConfig, RocksDbStorage};
 pub use rocksdb_snapshot::RocksDbSnapshotStorage;
+pub use rocksdb::{
+    RocksDbBloomFilterBitsPerKey,
+    RocksDbDurabilityMode,
+    RocksDbMemoryBudget,
+    RocksDbTuningOptions,
+    RocksDbWriteBufferManagerBudget,
+};

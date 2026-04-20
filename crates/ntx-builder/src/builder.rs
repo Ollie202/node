@@ -292,11 +292,16 @@ impl NetworkTransactionBuilder {
     async fn update_chain_tip(&mut self, tip: BlockHeader) {
         let mut chain_state = self.chain_state.write().await;
 
-        // Skip if this block is already accounted for. This can happen during initialization:
-        // the mempool subscription is created before the chain state is fetched from the store,
-        // so BlockCommitted events for blocks that occurred in between are already reflected in
-        // the initial chain state.
+        // Skip blocks already reflected in the chain state. A `BlockCommitted` event may arrive
+        // for a block whose state was already loaded from the store during startup: the mempool
+        // subscription is established first and then the chain tip is fetched, so any block
+        // committed in that window produces an event for state we have already ingested.
         if tip.block_num() <= chain_state.chain_tip_header.block_num() {
+            tracing::debug!(
+                event_block = %tip.block_num(),
+                current_tip = %chain_state.chain_tip_header.block_num(),
+                "skipping BlockCommitted event for block already in chain state",
+            );
             return;
         }
 
