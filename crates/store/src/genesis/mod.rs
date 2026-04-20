@@ -1,8 +1,6 @@
 use miden_node_utils::signer::BlockSigner;
-use miden_protocol::Word;
 use miden_protocol::account::delta::AccountUpdateDetails;
 use miden_protocol::account::{Account, AccountDelta, AccountStorageDelta, AccountVaultDelta};
-use miden_protocol::ONE;
 use miden_protocol::block::account_tree::{AccountIdKey, AccountTree};
 use miden_protocol::block::{
     BlockAccountUpdate,
@@ -18,6 +16,7 @@ use miden_protocol::crypto::merkle::mmr::{Forest, MmrPeaks};
 use miden_protocol::crypto::merkle::smt::{LargeSmt, MemoryStorage, Smt};
 use miden_protocol::note::Nullifier;
 use miden_protocol::transaction::{OrderedTransactionHeaders, TransactionKernel};
+use miden_protocol::{ONE, Word};
 
 pub mod config;
 
