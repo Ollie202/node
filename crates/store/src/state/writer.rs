@@ -117,7 +117,7 @@ impl BlockWriter {
     /// in an inconsistent state that cannot be recovered without a restart.
     pub(crate) async fn run(mut self, termination_ask: mpsc::Sender<String>) {
         while let Some(req) = self.rx.recv().await {
-            // Validate the block. No in-memory mutations occur here, so any error is safe — the
+            // Validate the block. No mutations occur here, so any error is safe — the
             // trees remain consistent and the writer can continue.
             let prepared = match self.validate_block(req.signed_block, req.proving_inputs).await {
                 Ok(prepared) => prepared,
