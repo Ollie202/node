@@ -132,7 +132,9 @@ impl BlockWriter {
             // without a restart.
             let result = Box::pin(self.commit_block(prepared)).await;
             let fatal_report = result.as_ref().err().map(ErrorReport::as_report);
+            // Send the result back to the caller (gRPC service).
             let _ = req.result_tx.send(result);
+            // Send the fatal report to the termination ask channel and end the writer loop.
             if let Some(report) = fatal_report {
                 let _ = termination_ask.send(report).await;
                 break;
