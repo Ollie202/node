@@ -3,10 +3,11 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use miden_node_proto::BlockProofRequest;
 use miden_node_utils::ErrorReport;
-use miden_protocol::account::delta::AccountUpdateDetails;
+use miden_protocol::Word;
+use miden_protocol::account::delta::{AccountDelta, AccountUpdateDetails};
 use miden_protocol::block::account_tree::AccountMutationSet;
 use miden_protocol::block::nullifier_tree::{NullifierMutationSet, NullifierTree};
-use miden_protocol::block::{BlockBody, BlockHeader, SignedBlock};
+use miden_protocol::block::{BlockBody, BlockHeader, BlockNumber, SignedBlock};
 use miden_protocol::crypto::merkle::smt::LargeSmt;
 use miden_protocol::note::NoteDetails;
 use miden_protocol::transaction::OutputNote;
@@ -77,9 +78,6 @@ pub(crate) struct BlockWriter {
     pub block_store: Arc<BlockStore>,
     /// Shared in-memory state. The writer publishes new snapshots via `ArcSwap::store()`.
     pub in_memory: Arc<ArcSwap<InMemoryState>>,
-
-    /// Channel to request process termination on fatal internal state errors.
-    pub termination_ask: mpsc::Sender<ApplyBlockError>,
 }
 
 // WRITE REQUEST
@@ -92,37 +90,68 @@ pub struct WriteRequest {
     pub result_tx: oneshot::Sender<Result<(), ApplyBlockError>>,
 }
 
+// PREPARED BLOCK
+// ================================================================================================
+
+/// Holds a validated block ready to be committed.
+///
+/// Produced by [`BlockWriter::validate_block`] after all checks pass but before any in-memory
+/// tree mutations occur. Consumed by [`BlockWriter::commit_block`].
+struct BlockCommittal {
+    signed_block: SignedBlock,
+    proving_inputs: Option<BlockProofRequest>,
+    nullifier_tree_update: NullifierMutationSet,
+    account_tree_update: AccountMutationSet,
+    notes: Vec<(NoteRecord, Option<miden_protocol::note::Nullifier>)>,
+    account_deltas: Vec<AccountDelta>,
+    snapshot: Arc<InMemoryState>,
+    block_num: BlockNumber,
+    block_commitment: Word,
+}
+
 impl BlockWriter {
     /// Runs the single writer loop. Receives blocks through the channel and applies them
     /// sequentially.
-    pub(crate) async fn run(mut self) {
+    ///
+    /// Signals process termination on fatal errors. Fatal errors leave the writer's in-memory trees
+    /// in an inconsistent state that cannot be recovered without a restart.
+    pub(crate) async fn run(mut self, termination_ask: mpsc::Sender<String>) {
         while let Some(req) = self.rx.recv().await {
-            let result = Box::pin(self.write_block(req.signed_block, req.proving_inputs)).await;
+            // Validate the block. No in-memory mutations occur here, so any error is safe — the
+            // trees remain consistent and the writer can continue.
+            let prepared = match self.validate_block(req.signed_block, req.proving_inputs).await {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    let _ = req.result_tx.send(Err(err));
+                    continue;
+                },
+            };
+
+            // Commit the block. In-memory trees are mutated here, so any error is always fatal —
+            // the trees are now ahead of persistent storage and the state cannot be reconciled
+            // without a restart.
+            let result = Box::pin(self.commit_block(prepared)).await;
+            let fatal_report = result.as_ref().err().map(ErrorReport::as_report);
             let _ = req.result_tx.send(result);
+            if let Some(report) = fatal_report {
+                let _ = termination_ask.send(report).await;
+                break;
+            }
         }
     }
 
-    /// Apply changes of a new block to the DB, file, and in-memory data structures.
+    /// Validates the block and computes all required mutations without applying them.
     ///
-    /// ## Consistency model
+    /// Performs header validation, loads the current in-memory snapshot, computes tree mutation
+    /// sets, validates note records, and collects account deltas. No in-memory state is modified.
     ///
-    /// This function is the sole writer to all state. The writer owns the writable trees directly.
-    ///
-    /// Because SQLite/files are committed **before** the in-memory swap, there is a window where
-    /// the DB is ahead of the in-memory state. Reader methods that combine in-memory and SQLite
-    /// data must scope their DB queries by the snapshot's `block_num` to maintain consistency
-    /// (see the doc comment on [`super::State`] for the full rules).
-    ///
-    /// Readers never block: they obtain an `Arc` via `ArcSwap::load_full()`, which performs only
-    /// an atomic refcount increment with no data cloning. The atomic swap guarantees readers see
-    /// either the old or new state, never a partial update. Readers holding an `Arc` to the old
-    /// state are completely unaffected by the swap.
+    /// Returns a [`BlockCommittal`] ready to be passed to [`Self::commit_block`].
     #[instrument(target = COMPONENT, skip_all, err, fields(block.number = signed_block.header().block_num().as_u32()))]
-    async fn write_block(
-        &mut self,
+    async fn validate_block(
+        &self,
         signed_block: SignedBlock,
         proving_inputs: Option<BlockProofRequest>,
-    ) -> Result<(), ApplyBlockError> {
+    ) -> Result<BlockCommittal, ApplyBlockError> {
         let header = signed_block.header();
         let body = signed_block.body();
         let block_num = header.block_num();
@@ -130,13 +159,12 @@ impl BlockWriter {
 
         self.validate_block_header(header, body).await?;
 
-        // Load the current in-memory state snapshot for validation (wait-free).
+        // Load the current in-memory state snapshot (wait-free).
         let snapshot = self.in_memory.load_full();
 
-        // Tree mutation, RocksDB writes, and snapshot construction are all CPU- and I/O-bound
-        // synchronous workloads. Run them inside block_in_place so tokio can evacuate other tasks
-        // from this thread for the duration.
-        let (snapshot_nullifier_tree, snapshot_account_tree, notes, account_deltas) =
+        // Tree mutation computation and note record building are CPU-bound. Run them inside
+        // block_in_place so tokio can evacuate other tasks from this thread for the duration.
+        let (nullifier_tree_update, account_tree_update, notes, account_deltas) =
             tokio::task::block_in_place(|| -> Result<_, ApplyBlockError> {
                 let (nullifier_tree_update, account_tree_update) =
                     self.compute_tree_mutations(&snapshot, header, body)?;
@@ -151,19 +179,70 @@ impl BlockWriter {
                         }
                     }));
 
-                self.nullifier_tree
-                    .apply_mutations(nullifier_tree_update)
-                    .expect("Unreachable: mutations were computed from the current tree state");
-
-                self.account_tree
-                    .apply_mutations(account_tree_update)
-                    .expect("Unreachable: mutations were computed from the current tree state");
-
-                let snapshot_nullifier_tree = self.build_snapshot_nullifier_tree();
-                let snapshot_account_tree = self.build_snapshot_account_tree();
-
-                Ok((snapshot_nullifier_tree, snapshot_account_tree, notes, account_deltas))
+                Ok((nullifier_tree_update, account_tree_update, notes, account_deltas))
             })?;
+
+        Ok(BlockCommittal {
+            signed_block,
+            proving_inputs,
+            nullifier_tree_update,
+            account_tree_update,
+            notes,
+            account_deltas,
+            snapshot,
+            block_num,
+            block_commitment,
+        })
+    }
+
+    /// Applies a validated block to in-memory state and persists it to storage.
+    ///
+    /// ## Consistency model
+    ///
+    /// This function is the sole writer to all state. The writer owns the writable trees directly.
+    ///
+    /// Because SQLite/files are committed **before** the in-memory swap, there is a window where
+    /// the DB is ahead of the in-memory state. Reader methods that combine in-memory and SQLite
+    /// data must scope their DB queries by the snapshot's `block_num` to maintain consistency
+    /// (see the doc comment on [`super::State`] for the full rules).
+    ///
+    /// Readers never block: they obtain an `Arc` via `ArcSwap::load_full()`, which performs only
+    /// an atomic refcount increment with no data cloning. The atomic swap guarantees readers see
+    /// either the old or new state, never a partial update. Readers holding an `Arc` to the old
+    /// state are completely unaffected by the swap.
+    ///
+    /// ## Fatal errors
+    ///
+    /// Any error returned by this function is fatal. The in-memory trees are mutated before
+    /// storage is updated, so a failure leaves the writer in an inconsistent state that cannot
+    /// be recovered without a process restart.
+    #[instrument(target = COMPONENT, skip_all, err, fields(block.number = prepared.block_num.as_u32()))]
+    async fn commit_block(&mut self, prepared: BlockCommittal) -> Result<(), ApplyBlockError> {
+        let BlockCommittal {
+            signed_block,
+            proving_inputs,
+            nullifier_tree_update,
+            account_tree_update,
+            notes,
+            account_deltas,
+            snapshot,
+            block_num,
+            block_commitment,
+        } = prepared;
+
+        // Apply tree mutations and build snapshot-backed read-only copies for InMemoryState.
+        // RocksDB writes are synchronous and CPU-bound; run inside block_in_place.
+        let (snapshot_nullifier_tree, snapshot_account_tree) = tokio::task::block_in_place(|| {
+            self.nullifier_tree
+                .apply_mutations(nullifier_tree_update)
+                .expect("Unreachable: mutations were computed from the current tree state");
+
+            self.account_tree
+                .apply_mutations(account_tree_update)
+                .expect("Unreachable: mutations were computed from the current tree state");
+
+            (self.build_snapshot_nullifier_tree(), self.build_snapshot_account_tree())
+        });
 
         let mut new_blockchain = snapshot.blockchain.clone();
         new_blockchain.push(block_commitment);
@@ -178,9 +257,6 @@ impl BlockWriter {
             blockchain: new_blockchain,
             forest: new_forest,
         };
-
-        // We have completed all in-memory mutations on the new clone of in-memory state. Now
-        // commit to storage before swapping the Arc.
 
         // Save the block to the block store.
         let signed_block_bytes = signed_block.to_bytes();
@@ -241,7 +317,7 @@ impl BlockWriter {
 
     /// Compute mutations for the nullifier tree and account tree.
     fn compute_tree_mutations(
-        &mut self,
+        &self,
         snapshot: &Arc<InMemoryState>,
         header: &BlockHeader,
         body: &BlockBody,
@@ -274,9 +350,6 @@ impl BlockWriter {
             .map_err(InvalidBlockError::NewBlockNullifierAlreadySpent)?;
 
         if nullifier_tree_update.as_mutation_set().root() != header.nullifier_root() {
-            let _ = self.termination_ask.try_send(ApplyBlockError::InvalidBlockError(
-                InvalidBlockError::NewBlockInvalidNullifierRoot,
-            ));
             return Err(InvalidBlockError::NewBlockInvalidNullifierRoot.into());
         }
 
@@ -298,9 +371,6 @@ impl BlockWriter {
             })?;
 
         if account_tree_update.as_mutation_set().root() != header.account_root() {
-            let _ = self.termination_ask.try_send(ApplyBlockError::InvalidBlockError(
-                InvalidBlockError::NewBlockInvalidAccountRoot,
-            ));
             return Err(InvalidBlockError::NewBlockInvalidAccountRoot.into());
         }
 

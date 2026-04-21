@@ -20,7 +20,6 @@ use url::Url;
 
 use crate::blocks::BlockStore;
 use crate::db::Db;
-use crate::errors::ApplyBlockError;
 use crate::genesis::GenesisBlock;
 use crate::proven_tip::ProvenTipWriter;
 use crate::state::State;
@@ -91,8 +90,7 @@ impl Store {
             "Loading database");
 
         // Load initial state.
-        let (termination_ask, mut termination_signal) =
-            tokio::sync::mpsc::channel::<ApplyBlockError>(1);
+        let (termination_ask, mut block_writer_signal) = tokio::sync::mpsc::channel::<String>(1);
         let (state, write_handle, tx_proven_tip) =
             State::load(&self.data_directory, self.storage_options, termination_ask)
                 .await
@@ -116,15 +114,15 @@ impl Store {
             self.ntx_builder_listener,
             self.block_producer_listener,
         )?;
-
-        // Wait on any workload to finish / error out.
-        let service = async move {
+        let grpc_services = async move {
             join_set.join_next().await.expect("joinset is not empty")?.map_err(Into::into)
         };
+
+        // Wait on any workload to finish / error out.
         tokio::select! {
-            result = service => result,
-            Some(err) = termination_signal.recv() => {
-                Err(anyhow::anyhow!("received termination signal").context(err))
+            result = grpc_services => result,
+            Some(err) = block_writer_signal.recv() => {
+                Err(anyhow::anyhow!("writer task terminated due to fatal error: {err}"))
             },
             result = proof_scheduler_task => {
                 match result {

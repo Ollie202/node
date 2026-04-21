@@ -50,7 +50,6 @@ use crate::blocks::BlockStore;
 use crate::db::models::Page;
 use crate::db::{Db, NoteRecord, NullifierInfo};
 use crate::errors::{
-    ApplyBlockError,
     DatabaseError,
     GetAccountError,
     GetBatchInputsError,
@@ -230,7 +229,7 @@ impl State {
     pub async fn load(
         data_path: &Path,
         storage_options: StorageOptions,
-        termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
+        termination_ask: tokio::sync::mpsc::Sender<String>,
     ) -> Result<(Arc<Self>, writer::WriteHandle, ProvenTipWriter), StateInitializationError> {
         let data_directory = DataDirectory::load(data_path.to_path_buf())
             .map_err(StateInitializationError::DataDirectoryLoadError)?;
@@ -343,20 +342,19 @@ impl State {
         }));
 
         // Build the writer context.
-        let writer_ctx = writer::BlockWriter {
+        let writer = writer::BlockWriter {
             rx: writer_rx,
             account_tree: account_tree_with_history,
             nullifier_tree,
             db: Arc::clone(&db),
             block_store: Arc::clone(&block_store),
             in_memory: Arc::clone(&in_memory),
-            termination_ask: termination_ask.clone(),
         };
 
         let state = Arc::new(Self { db, block_store, in_memory, proven_tip });
 
         // Spawn the single writer task.
-        tokio::spawn(writer_ctx.run());
+        tokio::spawn(writer.run(termination_ask));
 
         let write_handle = writer::WriteHandle::new(writer_tx);
 
