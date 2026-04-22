@@ -93,10 +93,10 @@ pub struct WriteRequest {
 // PREPARED BLOCK
 // ================================================================================================
 
-/// Holds a validated block ready to be committed.
+/// Holds a validated block with its mutations pre-computed, read to be committed.
 ///
-/// Produced by [`BlockWriter::validate_block`] after all checks pass but before any in-memory
-/// tree mutations occur. Consumed by [`BlockWriter::commit_block`].
+/// Produced by [`BlockWriter::prepare_block_committal`] after all checks pass but before any
+/// in-memory tree mutations occur. Consumed by [`BlockWriter::commit_block`].
 struct BlockCommittal {
     signed_block: SignedBlock,
     proving_inputs: Option<BlockProofRequest>,
@@ -119,18 +119,19 @@ impl BlockWriter {
         while let Some(req) = self.rx.recv().await {
             // Validate the block. No mutations occur here, so any error is safe — the
             // trees remain consistent and the writer can continue.
-            let prepared = match self.validate_block(req.signed_block, req.proving_inputs).await {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    let _ = req.result_tx.send(Err(err));
-                    continue;
-                },
-            };
+            let committal =
+                match self.prepare_block_committal(req.signed_block, req.proving_inputs).await {
+                    Ok(prepared) => prepared,
+                    Err(err) => {
+                        let _ = req.result_tx.send(Err(err));
+                        continue;
+                    },
+                };
 
             // Commit the block. In-memory trees are mutated here, so any error is always fatal —
             // the trees are now ahead of persistent storage and the state cannot be reconciled
             // without a restart.
-            let result = Box::pin(self.commit_block(prepared)).await;
+            let result = Box::pin(self.commit_block(committal)).await;
             let fatal_report = result.as_ref().err().map(ErrorReport::as_report);
             // Send the result back to the caller (gRPC service).
             let _ = req.result_tx.send(result);
@@ -149,7 +150,7 @@ impl BlockWriter {
     ///
     /// Returns a [`BlockCommittal`] ready to be passed to [`Self::commit_block`].
     #[instrument(target = COMPONENT, skip_all, err, fields(block.number = signed_block.header().block_num().as_u32()))]
-    async fn validate_block(
+    async fn prepare_block_committal(
         &self,
         signed_block: SignedBlock,
         proving_inputs: Option<BlockProofRequest>,
