@@ -21,7 +21,7 @@ use miden_crypto::utils::Serializable;
 use miden_protocol::block::{BlockNumber, BlockProof};
 use miden_remote_prover_client::RemoteProverClientError;
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, info, instrument};
 
@@ -31,6 +31,12 @@ use crate::db::Db;
 use crate::errors::{DatabaseError, ProofSchedulerError};
 use crate::proven_tip::ProvenTipWriter;
 use crate::server::block_prover_client::{BlockProver, StoreProverError};
+
+/// A proof notification sent to replica subscribers after a block proof is saved to disk.
+///
+/// Contains the block number and the raw serialized proof bytes, wrapped in `Arc` for cheap
+/// cloning across multiple broadcast receivers.
+pub type ProofNotification = Arc<(BlockNumber, Vec<u8>)>;
 
 // CONSTANTS
 // ================================================================================================
@@ -68,13 +74,15 @@ impl ProofTaskJoinSet {
         block_store: &Arc<BlockStore>,
         proven_tip: &Arc<ProvenTipWriter>,
         block_num: BlockNumber,
+        proof_sender: broadcast::Sender<ProofNotification>,
     ) {
         let db = Arc::clone(db);
         let block_prover = Arc::clone(block_prover);
         let block_store = Arc::clone(block_store);
         let proven_tip = Arc::clone(proven_tip);
         self.0.spawn(async move {
-            prove_block(&db, &block_prover, &block_store, &proven_tip, block_num).await
+            prove_block(&db, &block_prover, &block_store, &proven_tip, block_num, &proof_sender)
+                .await
         });
     }
 
@@ -101,6 +109,9 @@ impl ProofTaskJoinSet {
 /// The scheduler uses `chain_tip_rx` to learn about newly committed blocks and queries the DB
 /// for unproven blocks to prove.
 ///
+/// `proof_sender` is fired after each block proof is saved to disk so that replica subscribers
+/// receive proofs without polling.
+///
 /// Returns a [`JoinHandle`] that resolves when the scheduler encounters a fatal error or
 /// completes unexpectedly.
 pub fn spawn(
@@ -110,6 +121,7 @@ pub fn spawn(
     chain_tip_rx: watch::Receiver<BlockNumber>,
     proven_tip: ProvenTipWriter,
     max_concurrent_proofs: NonZeroUsize,
+    proof_sender: broadcast::Sender<ProofNotification>,
 ) -> JoinHandle<anyhow::Result<()>> {
     let proven_tip = Arc::new(proven_tip);
     tokio::spawn(run(
@@ -119,6 +131,7 @@ pub fn spawn(
         chain_tip_rx,
         proven_tip,
         max_concurrent_proofs,
+        proof_sender,
     ))
 }
 
@@ -138,6 +151,7 @@ async fn run(
     mut chain_tip_rx: watch::Receiver<BlockNumber>,
     proven_tip: Arc<ProvenTipWriter>,
     max_concurrent_proofs: NonZeroUsize,
+    proof_sender: broadcast::Sender<ProofNotification>,
 ) -> anyhow::Result<()> {
     info!(target: COMPONENT, "Proof scheduler started");
 
@@ -160,7 +174,14 @@ async fn run(
             }
 
             for block_num in unproven {
-                join_set.spawn(&db, &block_prover, &block_store, &proven_tip, block_num);
+                join_set.spawn(
+                    &db,
+                    &block_prover,
+                    &block_store,
+                    &proven_tip,
+                    block_num,
+                    proof_sender.clone(),
+                );
             }
         }
 
@@ -197,6 +218,7 @@ async fn prove_block(
     block_store: &BlockStore,
     proven_tip: &ProvenTipWriter,
     block_num: BlockNumber,
+    proof_sender: &broadcast::Sender<ProofNotification>,
 ) -> anyhow::Result<()> {
     tokio::time::timeout(BLOCK_PROVE_OVERALL_TIMEOUT, async {
         let mut attempt: u32 = 0;
@@ -221,8 +243,13 @@ async fn prove_block(
 
             match result {
                 Ok(Ok(proof)) => {
+                    let proof_bytes = proof.to_bytes();
+
                     // Save the block proof to file.
-                    block_store.save_proof(block_num, &proof.to_bytes()).await?;
+                    block_store.save_proof(block_num, &proof_bytes).await?;
+
+                    // Notify replica subscribers. Errors mean no active subscribers.
+                    let _ = proof_sender.send(Arc::new((block_num, proof_bytes)));
 
                     // Mark the block as proven and advance the sequence in the database.
                     let tip = db.mark_proven_and_advance_sequence(block_num).await?;

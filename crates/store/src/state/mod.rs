@@ -34,7 +34,7 @@ use miden_protocol::crypto::merkle::mmr::{MmrPeaks, MmrProof, PartialMmr};
 use miden_protocol::crypto::merkle::smt::{LargeSmt, SmtProof, SmtStorage};
 use miden_protocol::note::{NoteId, NoteScript, Nullifier};
 use miden_protocol::transaction::PartialBlockchain;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tracing::{Instrument, info, instrument};
 
 use crate::account_state_forest::{AccountStateForest, WitnessError};
@@ -54,6 +54,18 @@ use crate::errors::{
 };
 use crate::proven_tip::{ProvenTipReader, ProvenTipWriter};
 use crate::{COMPONENT, DataDirectory};
+
+/// A committed block notification sent to replica subscribers.
+///
+/// Contains the block number and its raw serialized bytes, wrapped in `Arc` to allow cheap
+/// cloning across multiple broadcast receivers.
+pub type BlockNotification = std::sync::Arc<(BlockNumber, Vec<u8>)>;
+
+/// Broadcast channel capacity for replica block notifications.
+///
+/// 512 slots gives replicas ~512 blocks of buffer during historical replay before
+/// the sender considers them lagged. On lag, the replica should reconnect.
+const BLOCK_BROADCAST_CAPACITY: usize = 512;
 
 mod loader;
 
@@ -141,6 +153,10 @@ pub struct State {
 
     /// The latest proven-in-sequence block number, updated by the proof scheduler.
     proven_tip: ProvenTipReader,
+
+    /// Broadcast sender for replica block notifications. Fired after each block is committed.
+    /// Replicas subscribe to receive a live stream without polling.
+    pub(crate) block_sender: broadcast::Sender<BlockNotification>,
 }
 
 impl State {
@@ -148,12 +164,17 @@ impl State {
     // --------------------------------------------------------------------------------------------
 
     /// Loads the state from the data directory.
+    ///
+    /// Returns `(Self, ProvenTipWriter, block_sender)`.
+    ///
+    /// `block_sender` is a [`broadcast::Sender`] that fires with each committed block. Callers
+    /// can call `.subscribe()` on it to receive a [`broadcast::Receiver`] for replica streaming.
     #[instrument(target = COMPONENT, skip_all)]
     pub async fn load(
         data_path: &Path,
         storage_options: StorageOptions,
         termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
-    ) -> Result<(Self, ProvenTipWriter), StateInitializationError> {
+    ) -> Result<(Self, ProvenTipWriter, broadcast::Sender<BlockNotification>), StateInitializationError> {
         let data_directory = DataDirectory::load(data_path.to_path_buf())
             .map_err(StateInitializationError::DataDirectoryLoadError)?;
 
@@ -206,6 +227,9 @@ impl State {
             db.proven_chain_tip().await.map_err(StateInitializationError::DatabaseError)?;
         let (proven_tip_writer, proven_tip) = ProvenTipWriter::new(proven_tip);
 
+        // Create the block broadcast channel for replica sync.
+        let (block_sender, _) = broadcast::channel(BLOCK_BROADCAST_CAPACITY);
+
         Ok((
             Self {
                 db,
@@ -215,8 +239,10 @@ impl State {
                 writer,
                 termination_ask,
                 proven_tip,
+                block_sender: block_sender.clone(),
             },
             proven_tip_writer,
+            block_sender,
         ))
     }
 

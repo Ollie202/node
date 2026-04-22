@@ -10,13 +10,14 @@ use miden_protocol::account::AccountId;
 use miden_protocol::batch::OrderedBatches;
 use miden_protocol::block::{BlockInputs, BlockNumber};
 use miden_protocol::note::Nullifier;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
 use crate::COMPONENT;
 use crate::errors::GetBlockInputsError;
-use crate::state::State;
+use crate::server::proof_scheduler::ProofNotification;
+use crate::state::{BlockNotification, State};
 
 // STORE API
 // ================================================================================================
@@ -26,6 +27,12 @@ pub struct StoreApi {
     pub(super) state: Arc<State>,
     /// Sender used to notify the proof scheduler of the latest committed block number.
     pub(super) chain_tip_sender: watch::Sender<BlockNumber>,
+    /// Broadcast sender for committed block notifications. Replicas call `.subscribe()` to
+    /// receive a stream of blocks without polling.
+    pub(super) block_sender: broadcast::Sender<BlockNotification>,
+    /// Broadcast sender for block proof notifications. Replicas call `.subscribe()` to
+    /// receive a stream of proofs without polling.
+    pub(super) proof_sender: broadcast::Sender<ProofNotification>,
 }
 
 impl StoreApi {

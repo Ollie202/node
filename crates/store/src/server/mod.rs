@@ -11,7 +11,7 @@ use miden_node_utils::clap::{GrpcOptionsInternal, StorageOptions};
 use miden_node_utils::panic::{CatchPanicLayer, catch_panic_layer_fn};
 use miden_node_utils::tracing::grpc::grpc_trace_fn;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
 use tower_http::trace::TraceLayer;
@@ -31,6 +31,7 @@ mod block_producer;
 pub mod block_prover_client;
 mod ntx_builder;
 pub mod proof_scheduler;
+mod replica;
 mod rpc_api;
 
 /// The store server.
@@ -93,10 +94,14 @@ impl Store {
         // Load initial state.
         let (termination_ask, mut termination_signal) =
             tokio::sync::mpsc::channel::<ApplyBlockError>(1);
-        let (state, tx_proven_tip) =
+        let (state, tx_proven_tip, block_sender) =
             State::load(&self.data_directory, self.storage_options, termination_ask)
                 .await
                 .context("failed to load state")?;
+
+        // Create the proof broadcast channel for replica sync.
+        const PROOF_BROADCAST_CAPACITY: usize = 512;
+        let (proof_sender, _) = broadcast::channel(PROOF_BROADCAST_CAPACITY);
 
         // Spawn proof scheduler.
         let (proof_scheduler_task, chain_tip_sender) = Self::spawn_proof_scheduler(
@@ -104,6 +109,7 @@ impl Store {
             self.block_prover_url,
             self.max_concurrent_proofs,
             tx_proven_tip,
+            proof_sender.clone(),
         )
         .await;
 
@@ -111,6 +117,8 @@ impl Store {
         let mut join_set = Self::spawn_grpc_servers(
             state,
             chain_tip_sender,
+            block_sender,
+            proof_sender,
             self.grpc_options,
             self.rpc_listener,
             self.ntx_builder_listener,
@@ -145,6 +153,7 @@ impl Store {
         block_prover_url: Option<Url>,
         max_concurrent_proofs: NonZeroUsize,
         proven_tip: ProvenTipWriter,
+        proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
     ) -> (
         tokio::task::JoinHandle<anyhow::Result<()>>,
         watch::Sender<miden_protocol::block::BlockNumber>,
@@ -165,15 +174,19 @@ impl Store {
             chain_tip_rx,
             proven_tip,
             max_concurrent_proofs,
+            proof_sender,
         );
 
         (handle, chain_tip_tx)
     }
 
     /// Spawns the gRPC servers and the DB maintenance background task.
+    #[expect(clippy::too_many_arguments)]
     fn spawn_grpc_servers(
         state: State,
         chain_tip_sender: watch::Sender<miden_protocol::block::BlockNumber>,
+        block_sender: broadcast::Sender<crate::state::BlockNotification>,
+        proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
         ntx_builder_listener: TcpListener,
@@ -183,15 +196,27 @@ impl Store {
         let rpc_service = store::rpc_server::RpcServer::new(api::StoreApi {
             state: Arc::clone(&state),
             chain_tip_sender: chain_tip_sender.clone(),
+            block_sender: block_sender.clone(),
+            proof_sender: proof_sender.clone(),
+        });
+        let replica_service = store::store_replica_server::StoreReplicaServer::new(api::StoreApi {
+            state: Arc::clone(&state),
+            chain_tip_sender: chain_tip_sender.clone(),
+            block_sender: block_sender.clone(),
+            proof_sender: proof_sender.clone(),
         });
         let ntx_builder_service = store::ntx_builder_server::NtxBuilderServer::new(api::StoreApi {
             state: Arc::clone(&state),
             chain_tip_sender: chain_tip_sender.clone(),
+            block_sender: block_sender.clone(),
+            proof_sender: proof_sender.clone(),
         });
         let block_producer_service =
             store::block_producer_server::BlockProducerServer::new(api::StoreApi {
                 state: Arc::clone(&state),
                 chain_tip_sender,
+                block_sender,
+                proof_sender,
             });
         let reflection_service = tonic_reflection::server::Builder::configure()
             .register_file_descriptor_set(store_api_descriptor())
@@ -220,6 +245,7 @@ impl Store {
                 .layer(CatchPanicLayer::custom(catch_panic_layer_fn))
                 .layer(TraceLayer::new_for_grpc().make_span_with(grpc_trace_fn))
                 .add_service(rpc_service)
+                .add_service(replica_service)
                 .add_service(reflection_service.clone())
                 .serve_with_incoming(TcpListenerStream::new(rpc_listener)),
         );
