@@ -12,18 +12,24 @@ fi
 
 GENESIS_CONFIG="crates/store/src/genesis/config/samples/01-simple.toml"
 STORE_DIR="/tmp/store"
+STORE_REPLICA_DIR="/tmp/store-replica"
 VALIDATOR_DIR="/tmp/validator"
 NTX_BUILDER_DIR="/tmp/ntx-builder"
 ACCOUNTS_DIR="/tmp/accounts"
 
-# Store exposes 3 separate APIs.
+# Primary store exposes 3 separate APIs.
 STORE_RPC_URL="http://0.0.0.0:50001"
 STORE_NTX_BUILDER_URL="http://0.0.0.0:50002"
 STORE_BLOCK_PRODUCER_URL="http://0.0.0.0:50003"
 
+# Replica store exposes 2 APIs (no block-producer endpoint in replica mode).
+STORE_REPLICA_RPC_URL="http://0.0.0.0:50011"
+STORE_REPLICA_NTX_BUILDER_URL="http://0.0.0.0:50012"
+
 VALIDATOR_URL="http://0.0.0.0:50101"
 BLOCK_PRODUCER_URL="http://0.0.0.0:50201"
 RPC_URL="http://0.0.0.0:57291"
+RPC_REPLICA_URL="http://0.0.0.0:57292"
 
 PIDS=()
 
@@ -39,7 +45,7 @@ trap cleanup EXIT INT TERM
 
 # --- Kill processes on required ports ---
 
-PORTS=(50001 50002 50003 50101 50201 57291)
+PORTS=(50001 50002 50003 50011 50012 50101 50201 57291 57292)
 echo "=== Killing processes on required ports ==="
 for port in "${PORTS[@]}"; do
     pids=$(lsof -ti :"$port" 2>/dev/null || true)
@@ -57,7 +63,7 @@ sleep 1
 if [[ "$SKIP_BOOTSTRAP" != "true" ]]; then
     echo "=== Bootstrapping ==="
 
-    rm -rf "$VALIDATOR_DIR" "$ACCOUNTS_DIR" "$STORE_DIR" "$NTX_BUILDER_DIR"
+    rm -rf "$VALIDATOR_DIR" "$ACCOUNTS_DIR" "$STORE_DIR" "$STORE_REPLICA_DIR" "$NTX_BUILDER_DIR"
     mkdir -p "$NTX_BUILDER_DIR"
 
     echo "Bootstrapping validator..."
@@ -77,6 +83,11 @@ if [[ "$SKIP_BOOTSTRAP" != "true" ]]; then
     $BINARY store bootstrap \
         --data-directory "$STORE_DIR" \
         --genesis-block "$VALIDATOR_DIR/genesis.dat"
+
+    echo "Bootstrapping store replica..."
+    $BINARY store bootstrap \
+        --data-directory "$STORE_REPLICA_DIR" \
+        --genesis-block "$VALIDATOR_DIR/genesis.dat"
 else
     echo "=== Skipping bootstrap (SKIP_BOOTSTRAP=true) ==="
 fi
@@ -85,13 +96,12 @@ fi
 
 echo "=== Starting components ==="
 
-echo "Starting store..."
+echo "Starting store (block-producer mode)..."
 $BINARY store start \
     --rpc.url "$STORE_RPC_URL" \
     --ntx-builder.url "$STORE_NTX_BUILDER_URL" \
     --block-producer.url "$STORE_BLOCK_PRODUCER_URL" \
-    --data-directory "$STORE_DIR" \
-    --enable-otel &
+    --data-directory "$STORE_DIR" &
 PIDS+=($!)
 
 KMS_START_ARGS=()
@@ -101,7 +111,6 @@ fi
 
 echo "Starting validator..."
 $BINARY validator start "$VALIDATOR_URL" \
-    --enable-otel \
     --data-directory "$VALIDATOR_DIR" \
     "${KMS_START_ARGS[@]+"${KMS_START_ARGS[@]}"}" &
 PIDS+=($!)
@@ -109,16 +118,32 @@ PIDS+=($!)
 # Give store and validator a moment to bind their ports.
 sleep 2
 
+echo "Starting store replica..."
+$BINARY store start-replica \
+    --rpc.url "$STORE_REPLICA_RPC_URL" \
+    --ntx-builder.url "$STORE_REPLICA_NTX_BUILDER_URL" \
+    --upstream-store.url "http://127.0.0.1:50001" \
+    --data-directory "$STORE_REPLICA_DIR" &
+PIDS+=($!)
+
 echo "Starting block producer..."
 $BINARY block-producer start "$BLOCK_PRODUCER_URL" \
     --store.url "http://127.0.0.1:50003" \
     --validator.url "http://127.0.0.1:50101" &
 PIDS+=($!)
 
-echo "Starting RPC server..."
+echo "Starting RPC server (primary store)..."
 $BINARY rpc start \
     --url "$RPC_URL" \
     --store.url "http://127.0.0.1:50001" \
+    --block-producer.url "http://127.0.0.1:50201" \
+    --validator.url "http://127.0.0.1:50101" &
+PIDS+=($!)
+
+echo "Starting RPC server (replica store)..."
+$BINARY rpc start \
+    --url "$RPC_REPLICA_URL" \
+    --store.url "http://127.0.0.1:50011" \
     --block-producer.url "http://127.0.0.1:50201" \
     --validator.url "http://127.0.0.1:50101" &
 PIDS+=($!)
