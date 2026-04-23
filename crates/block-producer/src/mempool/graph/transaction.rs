@@ -117,50 +117,53 @@ impl TransactionGraph {
     }
 
     pub fn select_batch(&mut self, budget: BatchBudget) -> Option<SelectedBatch> {
-        self.select_user_batch().or_else(|| self.select_conventional_batch(budget))
+        self.select_user_batch().or_else(|| self.select_internal_batch(budget))
     }
 
     fn select_user_batch(&mut self) -> Option<SelectedBatch> {
-        // Comb through all user batch candidates.
-        let candidate_batches = self
-            .inner
-            .selection_candidates()
-            .values()
-            .filter_map(|tx| self.user_batches.get_batch_containing_tx(&tx.id()))
-            .copied()
-            .collect::<HashSet<_>>();
-
-        'outer: for candidate in candidate_batches {
-            let mut selected = SelectedBatch::builder();
-
-            let txs = self
-                .user_batches
-                .get_txs_contained_in_batch(&candidate)
-                .expect("bi-directional mapping should be coherent");
-
-            for tx in txs {
-                let Some(tx) = self.inner.selection_candidates().get(&tx).copied() else {
-                    // Rollback this batch selection since it cannot complete.
-                    for tx in selected.txs.into_iter().rev() {
-                        self.inner.deselect(tx.id());
-                    }
-
-                    continue 'outer;
-                };
-                let tx = Arc::clone(tx);
-
-                self.inner.select_candidate(tx.id());
-                selected.push(tx);
+        let candidate_batches = self.user_batches.batches().copied().collect::<HashSet<_>>();
+        for candidate in candidate_batches {
+            if let Some(batch) = self.try_select_user_batch_candidate(candidate) {
+                return Some(batch);
             }
-
-            assert!(!selected.is_empty(), "User batch should not be empty");
-            return Some(selected.build());
         }
 
         None
     }
 
-    fn select_conventional_batch(&mut self, mut budget: BatchBudget) -> Option<SelectedBatch> {
+    /// Attempts to select all transactions from the candidate user batch.
+    ///
+    /// This action succeeds if all transactions in the batch can be sequentially selected.
+    /// If any transaction cannot be selected, then all previous selections are rolled back,
+    /// and `None` is returned. This makes this function atomic.
+    ///
+    /// Transactions can fail selection if they depend on any external transactions that have
+    /// not yet been selected.
+    fn try_select_user_batch_candidate(&mut self, candidate: BatchId) -> Option<SelectedBatch> {
+        let mut selected = SelectedBatch::builder();
+
+        let txs = self.user_batches.get_txs_contained_in_batch(&candidate)?;
+
+        for tx in txs {
+            let Some(tx) = self.inner.selection_candidates().get(&tx).copied() else {
+                // Rollback this batch selection since it cannot complete.
+                for tx in selected.txs.into_iter().rev() {
+                    self.inner.deselect(tx.id());
+                }
+
+                return None;
+            };
+            let tx = Arc::clone(tx);
+
+            self.inner.select_candidate(tx.id());
+            selected.push(tx);
+        }
+
+        assert!(!selected.is_empty(), "User batch should not be empty");
+        Some(selected.build())
+    }
+
+    fn select_internal_batch(&mut self, mut budget: BatchBudget) -> Option<SelectedBatch> {
         let mut selected = SelectedBatch::builder();
 
         loop {
@@ -365,6 +368,10 @@ impl BatchTxMap {
             self.by_tx.remove(tx);
         }
         txs
+    }
+
+    fn batches(&self) -> impl Iterator<Item = &BatchId> {
+        self.by_batch.keys()
     }
 
     /// Returns the [`BatchId`] mapped to this transaction, if any.
