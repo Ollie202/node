@@ -34,9 +34,12 @@ use crate::server::block_prover_client::{BlockProver, StoreProverError};
 
 /// A proof notification sent to replica subscribers after a block proof is saved to disk.
 ///
-/// Contains the block number and the raw serialized proof bytes, wrapped in `Arc` for cheap
-/// cloning across multiple broadcast receivers.
-pub type ProofNotification = Arc<(BlockNumber, Vec<u8>)>;
+/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
+#[derive(Clone, Debug)]
+pub struct ProofNotification {
+    pub block_num: BlockNumber,
+    pub proof_bytes: Vec<u8>,
+}
 
 // CONSTANTS
 // ================================================================================================
@@ -249,7 +252,7 @@ async fn prove_block(
                     block_store.save_proof(block_num, &proof_bytes).await?;
 
                     // Notify replica subscribers. Errors mean no active subscribers.
-                    let _ = proof_sender.send(Arc::new((block_num, proof_bytes)));
+                    let _ = proof_sender.send(ProofNotification { block_num, proof_bytes });
 
                     // Mark the block as proven and advance the sequence in the database.
                     let tip = db.mark_proven_and_advance_sequence(block_num).await?;

@@ -55,11 +55,14 @@ use crate::errors::{
 use crate::proven_tip::{ProvenTipReader, ProvenTipWriter};
 use crate::{COMPONENT, DataDirectory};
 
-/// A committed block notification sent to replica subscribers.
+/// A committed block notification sent to replica subscribers via broadcast channel.
 ///
-/// Contains the block number and its raw serialized bytes, wrapped in `Arc` to allow cheap
-/// cloning across multiple broadcast receivers.
-pub type BlockNotification = std::sync::Arc<(BlockNumber, Vec<u8>)>;
+/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
+#[derive(Clone, Debug)]
+pub struct BlockNotification {
+    pub block_num: BlockNumber,
+    pub block_bytes: Vec<u8>,
+}
 
 /// Broadcast channel capacity for replica block notifications.
 ///

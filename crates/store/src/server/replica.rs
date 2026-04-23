@@ -123,8 +123,8 @@ fn build_block_stream(
     // Phase 2: forward live blocks, skipping any already covered by the replay.
     // filter_map in tokio_stream is synchronous.
     let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
-        Ok(ref notification) if notification.0 > chain_tip => {
-            Some(Ok(BlockEvent { block: notification.1.clone() }))
+        Ok(ref notification) if notification.block_num > chain_tip => {
+            Some(Ok(BlockEvent { block: notification.block_bytes.clone() }))
         },
         Ok(_) => None, // already replayed
         Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(Status::data_loss(format!(
@@ -167,9 +167,9 @@ fn build_proof_stream(
 
     // Phase 2: forward live proof notifications, skipping those already covered by replay.
     let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
-        Ok(ref notification) if notification.0 > proven_tip => Some(Ok(ProofEvent {
-            block_num: notification.0.as_u32(),
-            proof: notification.1.clone(),
+        Ok(ref notification) if notification.block_num > proven_tip => Some(Ok(ProofEvent {
+            block_num: notification.block_num.as_u32(),
+            proof: notification.proof_bytes.clone(),
         })),
         Ok(_) => None, // already replayed
         Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(Status::data_loss(format!(
