@@ -50,7 +50,7 @@ pub enum StoreMode {
     /// Accepts blocks from a block producer via the `BlockProducer` gRPC service.
     ///
     /// Exposes the `BlockProducer` and `NtxBuilder` gRPC services and runs the proof scheduler
-    /// to generate block proofs locally.
+    /// to generate block proofs.
     BlockProducer {
         /// Listener for the block producer gRPC endpoint.
         block_producer_listener: TcpListener,

@@ -36,7 +36,7 @@ pub enum StoreCommand {
     /// Starts the store in block-producer mode.
     ///
     /// In this mode the store accepts blocks from a block producer via a dedicated gRPC endpoint
-    /// and runs the proof scheduler to generate block proofs locally.
+    /// and runs the proof scheduler to generate block proofs.
     Start {
         /// Url at which to serve the store's RPC API.
         #[arg(long = "rpc.url", env = ENV_STORE_RPC_URL, value_name = "URL")]
@@ -149,8 +149,14 @@ impl StoreCommand {
                 grpc_options,
                 storage_options,
             } => {
-                Self::start_replica(rpc_url, upstream_store_url, data_directory, grpc_options, storage_options)
-                    .await
+                Self::start_replica(
+                    rpc_url,
+                    upstream_store_url,
+                    data_directory,
+                    grpc_options,
+                    storage_options,
+                )
+                .await
             },
         }
     }
