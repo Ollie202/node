@@ -155,17 +155,14 @@ impl Store {
                 )
                 .await?
             },
-            StoreMode::Replica { upstream_url } => {
-                Self::setup_replica_mode(
-                    state,
-                    upstream_url,
-                    block_sender,
-                    proof_sender,
-                    self.grpc_options,
-                    self.rpc_listener,
-                )
-                .await?
-            },
+            StoreMode::Replica { upstream_url } => Self::setup_replica_mode(
+                state,
+                upstream_url,
+                block_sender,
+                proof_sender,
+                self.grpc_options,
+                self.rpc_listener,
+            )?,
         };
 
         let service = async move {
@@ -218,15 +215,24 @@ impl Store {
         )
         .await;
 
-        let join_set = Self::spawn_grpc_servers(
-            &Arc::new(state),
-            chain_tip_sender,
+        let state = Arc::new(state);
+        let store_api = api::StoreApi {
+            state,
             block_sender,
             proof_sender,
+        };
+        let block_producer_api = block_producer::BlockProducerApi {
+            inner: store_api.clone(),
+            chain_tip_sender,
+        };
+
+        let join_set = Self::spawn_block_producer_grpc_servers(
+            store_api,
+            block_producer_api,
             grpc_options,
             rpc_listener,
-            Some(ntx_builder_listener),
-            Some(block_producer_listener),
+            ntx_builder_listener,
+            block_producer_listener,
         )?;
 
         Ok(ModeSetup {
@@ -235,7 +241,7 @@ impl Store {
         })
     }
 
-    async fn setup_replica_mode(
+    fn setup_replica_mode(
         state: State,
         upstream_url: Url,
         block_sender: broadcast::Sender<crate::state::BlockNotification>,
@@ -245,24 +251,11 @@ impl Store {
     ) -> anyhow::Result<ModeSetup> {
         info!(target: COMPONENT, %upstream_url, "Starting in replica mode");
 
-        // A dummy watch channel satisfies StoreApi's chain_tip_sender field; no proof
-        // scheduler reads from it in replica mode.
-        let chain_tip = state.chain_tip(crate::state::Finality::Committed).await;
-        let (chain_tip_sender, _) = watch::channel(chain_tip);
-
         let state = Arc::new(state);
         let replica_task = replica_client::spawn(Arc::clone(&state), upstream_url);
 
-        let join_set = Self::spawn_grpc_servers(
-            &state,
-            chain_tip_sender,
-            block_sender,
-            proof_sender,
-            grpc_options,
-            rpc_listener,
-            None,
-            None,
-        )?;
+        let store_api = api::StoreApi { state, block_sender, proof_sender };
+        let join_set = Self::spawn_replica_grpc_servers(store_api, grpc_options, rpc_listener)?;
 
         Ok(ModeSetup {
             grpc_servers: join_set,
@@ -306,30 +299,77 @@ impl Store {
         (handle, chain_tip_tx)
     }
 
-    /// Spawns the gRPC servers and the DB maintenance background task.
+    /// Spawns the gRPC servers for block-producer mode and the DB maintenance task.
     ///
-    /// - `ntx_builder_listener`: `Some` in block-producer mode, `None` in replica mode.
-    /// - `block_producer_listener`: `Some` in block-producer mode, `None` in replica mode.
-    #[expect(clippy::too_many_arguments)]
-    fn spawn_grpc_servers(
-        state: &Arc<State>,
-        chain_tip_sender: watch::Sender<miden_protocol::block::BlockNumber>,
-        block_sender: broadcast::Sender<crate::state::BlockNotification>,
-        proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
+    /// Starts three listeners: Rpc+StoreReplica (shared), `NtxBuilder`, and `BlockProducer`.
+    fn spawn_block_producer_grpc_servers(
+        store_api: api::StoreApi,
+        block_producer_api: block_producer::BlockProducerApi,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
-        ntx_builder_listener: Option<TcpListener>,
-        block_producer_listener: Option<TcpListener>,
+        ntx_builder_listener: TcpListener,
+        block_producer_listener: TcpListener,
     ) -> anyhow::Result<JoinSet<Result<(), tonic::transport::Error>>> {
-        let make_api = |state: &Arc<State>| api::StoreApi {
-            state: Arc::clone(state),
-            chain_tip_sender: chain_tip_sender.clone(),
-            block_sender: block_sender.clone(),
-            proof_sender: proof_sender.clone(),
+        let rpc_service = store::rpc_server::RpcServer::new(store_api.clone());
+        let replica_service = store::store_replica_server::StoreReplicaServer::new(store_api.clone());
+        let ntx_builder_service = store::ntx_builder_server::NtxBuilderServer::new(store_api.clone());
+        let block_producer_service =
+            store::block_producer_server::BlockProducerServer::new(block_producer_api);
+
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_file_descriptor_set(store_api_descriptor())
+            .build_v1()
+            .context("failed to build reflection service")?;
+
+        info!(target: COMPONENT, "Database loaded");
+
+        let make_server = || {
+            tonic::transport::Server::builder()
+                .timeout(grpc_options.request_timeout)
+                .layer(CatchPanicLayer::custom(catch_panic_layer_fn))
+                .layer(TraceLayer::new_for_grpc().make_span_with(grpc_trace_fn))
         };
 
-        let rpc_service = store::rpc_server::RpcServer::new(make_api(state));
-        let replica_service = store::store_replica_server::StoreReplicaServer::new(make_api(state));
+        let mut join_set = JoinSet::new();
+        Self::spawn_db_maintenance(&mut join_set, &store_api.state);
+
+        join_set.spawn(
+            make_server()
+                .add_service(rpc_service)
+                .add_service(replica_service)
+                .add_service(reflection_service.clone())
+                .serve_with_incoming(TcpListenerStream::new(rpc_listener)),
+        );
+
+        join_set.spawn(
+            make_server()
+                .add_service(ntx_builder_service)
+                .add_service(reflection_service.clone())
+                .serve_with_incoming(TcpListenerStream::new(ntx_builder_listener)),
+        );
+
+        join_set.spawn(
+            make_server()
+                .accept_http1(true)
+                .add_service(block_producer_service)
+                .add_service(reflection_service)
+                .serve_with_incoming(TcpListenerStream::new(block_producer_listener)),
+        );
+
+        Ok(join_set)
+    }
+
+    /// Spawns the gRPC servers for replica mode and the DB maintenance task.
+    ///
+    /// Only the Rpc and `StoreReplica` services are exposed — no `BlockProducer`, `NtxBuilder`, or
+    /// proof scheduler.
+    fn spawn_replica_grpc_servers(
+        store_api: api::StoreApi,
+        grpc_options: GrpcOptionsInternal,
+        rpc_listener: TcpListener,
+    ) -> anyhow::Result<JoinSet<Result<(), tonic::transport::Error>>> {
+        let rpc_service = store::rpc_server::RpcServer::new(store_api.clone());
+        let replica_service = store::store_replica_server::StoreReplicaServer::new(store_api.clone());
 
         let reflection_service = tonic_reflection::server::Builder::configure()
             .register_file_descriptor_set(store_api_descriptor())
@@ -339,19 +379,7 @@ impl Store {
         info!(target: COMPONENT, "Database loaded");
 
         let mut join_set = JoinSet::new();
-
-        let state_for_maintenance = Arc::clone(state);
-        join_set.spawn(async move {
-            // Manual tests on testnet indicate each iteration takes ~2s once things are OS cached.
-            //
-            // 5 minutes seems like a reasonable interval, where this should have minimal database
-            // IO impact while providing a decent view into table growth over time.
-            let mut interval = tokio::time::interval(Duration::from_mins(5));
-            loop {
-                interval.tick().await;
-                let _ = state_for_maintenance.analyze_table_sizes().await;
-            }
-        });
+        Self::spawn_db_maintenance(&mut join_set, &store_api.state);
 
         join_set.spawn(
             tonic::transport::Server::builder()
@@ -360,45 +388,29 @@ impl Store {
                 .layer(TraceLayer::new_for_grpc().make_span_with(grpc_trace_fn))
                 .add_service(rpc_service)
                 .add_service(replica_service)
-                .add_service(reflection_service.clone())
+                .add_service(reflection_service)
                 .serve_with_incoming(TcpListenerStream::new(rpc_listener)),
         );
 
-        if let Some(listener) = ntx_builder_listener {
-            let ntx_builder_service =
-                store::ntx_builder_server::NtxBuilderServer::new(make_api(state));
-            join_set.spawn(
-                tonic::transport::Server::builder()
-                    .timeout(grpc_options.request_timeout)
-                    .layer(CatchPanicLayer::custom(catch_panic_layer_fn))
-                    .layer(TraceLayer::new_for_grpc().make_span_with(grpc_trace_fn))
-                    .add_service(ntx_builder_service)
-                    .add_service(reflection_service.clone())
-                    .serve_with_incoming(TcpListenerStream::new(listener)),
-            );
-        }
-
-        if let Some(listener) = block_producer_listener {
-            let block_producer_service =
-                store::block_producer_server::BlockProducerServer::new(api::StoreApi {
-                    state: Arc::clone(state),
-                    chain_tip_sender,
-                    block_sender,
-                    proof_sender,
-                });
-            join_set.spawn(
-                tonic::transport::Server::builder()
-                    .accept_http1(true)
-                    .timeout(grpc_options.request_timeout)
-                    .layer(CatchPanicLayer::custom(catch_panic_layer_fn))
-                    .layer(TraceLayer::new_for_grpc().make_span_with(grpc_trace_fn))
-                    .add_service(block_producer_service)
-                    .add_service(reflection_service)
-                    .serve_with_incoming(TcpListenerStream::new(listener)),
-            );
-        }
-
         Ok(join_set)
+    }
+
+    fn spawn_db_maintenance(
+        join_set: &mut JoinSet<Result<(), tonic::transport::Error>>,
+        state: &Arc<State>,
+    ) {
+        let state = Arc::clone(state);
+        join_set.spawn(async move {
+            // Manual tests on testnet indicate each iteration takes ~2s once things are OS cached.
+            //
+            // 5 minutes seems like a reasonable interval, where this should have minimal database
+            // IO impact while providing a decent view into table growth over time.
+            let mut interval = tokio::time::interval(Duration::from_mins(5));
+            loop {
+                interval.tick().await;
+                let _ = state.analyze_table_sizes().await;
+            }
+        });
     }
 }
 
