@@ -7,6 +7,7 @@ services:
     volumes:
       - genesis-data:/genesis
       - store-data:/store
+      - store-replica-data:/store-replica
       - validator-data:/validator
       - accounts:/accounts
     entrypoint: ["/bin/sh", "-c"]
@@ -21,6 +22,10 @@ services:
         echo "Bootstrapping store..."
         miden-node store bootstrap \
           --data-directory /store \
+          --genesis-block /genesis/genesis.dat
+        echo "Bootstrapping store replica..."
+        miden-node store bootstrap \
+          --data-directory /store-replica \
           --genesis-block /genesis/genesis.dat
 
   store:
@@ -120,9 +125,51 @@ services:
       - --validator.url=http://validator:50101
       - --data-directory=/data
 
+  store-replica:
+    image: miden-node-image
+    pull_policy: if_not_present
+    volumes:
+      - store-replica-data:/data
+    environment:
+      - MIDEN_NODE_ENABLE_OTEL=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=store-replica
+    command:
+      - miden-node
+      - store
+      - start-replica
+      - --rpc.url=http://0.0.0.0:50011
+      - --upstream-store.url=http://store:50001
+      - --data-directory=/data
+    ports:
+      - "50011:50011"
+    depends_on:
+      - store
+
+  rpc-replica:
+    image: miden-node-image
+    pull_policy: if_not_present
+    environment:
+      - MIDEN_NODE_ENABLE_OTEL=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=rpc-replica
+    command:
+      - miden-node
+      - rpc
+      - start
+      - --url=http://0.0.0.0:57292
+      - --store.url=http://store-replica:50011
+      - --block-producer.url=http://block-producer:50201
+      - --validator.url=http://validator:50101
+    ports:
+      - "57292:57292"
+    depends_on:
+      - store-replica
+
 volumes:
   genesis-data:
   store-data:
+  store-replica-data:
   validator-data:
   ntx-builder-data:
   accounts:
