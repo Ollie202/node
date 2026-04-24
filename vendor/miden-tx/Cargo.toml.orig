@@ -1,0 +1,39 @@
+[package]
+authors.workspace      = true
+categories             = ["no-std"]
+description            = "Miden blockchain transaction executor and prover"
+edition.workspace      = true
+homepage.workspace     = true
+keywords               = ["miden", "transaction"]
+license.workspace      = true
+name                   = "miden-tx"
+readme                 = "README.md"
+repository.workspace   = true
+rust-version.workspace = true
+version.workspace      = true
+
+[features]
+concurrent = ["miden-prover/concurrent", "std"]
+default    = ["std"]
+std        = ["miden-processor/std", "miden-protocol/std", "miden-prover/std", "miden-standards/std", "miden-verifier/std"]
+testing    = ["miden-processor/testing", "miden-protocol/testing", "miden-standards/testing"]
+
+[dependencies]
+# Workspace dependencies
+miden-protocol  = { workspace = true }
+miden-standards = { workspace = true }
+
+# Miden dependencies
+miden-processor = { workspace = true }
+miden-prover    = { workspace = true }
+miden-verifier  = { workspace = true }
+
+# External dependencies
+thiserror = { workspace = true }
+
+[dev-dependencies]
+anyhow         = { features = ["backtrace", "std"], workspace = true }
+assert_matches = { workspace = true }
+miden-assembly = { workspace = true }
+miden-tx       = { features = ["testing"], path = "." }
+rstest         = { workspace = true }

@@ -126,7 +126,10 @@ impl ProofRequest {
             .unwrap();
 
         let tx = Box::pin(tx.execute()).await.unwrap();
-        let tx = LocalTransactionProver::default().prove(tx.tx_inputs().clone()).await.unwrap();
+        let tx = LocalTransactionProver::default()
+            .prove_transaction_inputs(tx.tx_inputs().clone())
+            .await
+            .unwrap();
 
         ProposedBatch::new(
             vec![Arc::new(tx)],

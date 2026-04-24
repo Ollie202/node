@@ -321,7 +321,7 @@ impl NtxContext {
         } else {
             // Only perform tx inputs clone for local proving.
             let tx_inputs = tx_inputs.clone();
-            LocalTransactionProver::default().prove(tx_inputs).await
+            LocalTransactionProver::default().prove_transaction_inputs(tx_inputs).await
         }
         .map_err(NtxError::Proving)
     }

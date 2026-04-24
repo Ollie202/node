@@ -100,7 +100,7 @@ impl ProveRequest for LocalTransactionProver {
     type Output = ProvenTransaction;
 
     async fn prove(&self, input: Self::Input) -> Result<Self::Output, tonic::Status> {
-        LocalTransactionProver::prove(self, input).await.map_err(|e| {
+        LocalTransactionProver::prove_transaction_inputs(self, input).await.map_err(|e| {
             tonic::Status::internal(e.as_report_context("failed to prove transaction"))
         })
     }

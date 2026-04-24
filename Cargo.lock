@@ -3700,8 +3700,6 @@ dependencies = [
 [[package]]
 name = "miden-tx"
 version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d788795041ce5e6f947a3256314373171e4877c11b86fafeabcec4d8b8628d9"
 dependencies = [
  "miden-processor",
  "miden-protocol",
