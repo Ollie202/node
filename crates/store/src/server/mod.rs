@@ -158,6 +158,7 @@ impl Store {
             StoreMode::Replica { upstream_url } => Self::setup_replica_mode(
                 state,
                 upstream_url,
+                tx_proven_tip,
                 block_sender,
                 proof_sender,
                 self.grpc_options,
@@ -237,6 +238,7 @@ impl Store {
     fn setup_replica_mode(
         state: State,
         upstream_url: Url,
+        proven_tip: ProvenTipWriter,
         block_sender: broadcast::Sender<crate::state::BlockNotification>,
         proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
         grpc_options: GrpcOptionsInternal,
@@ -245,7 +247,12 @@ impl Store {
         info!(target: COMPONENT, %upstream_url, "Starting in replica mode");
 
         let state = Arc::new(state);
-        let replica_task = replica_client::spawn(Arc::clone(&state), upstream_url);
+        let replica_task = replica_client::spawn(
+            Arc::clone(&state),
+            upstream_url,
+            proven_tip,
+            proof_sender.clone(),
+        );
 
         let store_api = api::StoreApi { state, block_sender, proof_sender };
         let join_set = Self::spawn_replica_grpc_servers(store_api, grpc_options, rpc_listener)?;
