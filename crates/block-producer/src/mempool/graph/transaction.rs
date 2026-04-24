@@ -89,6 +89,9 @@ impl TransactionGraph {
         self.inner.append(tx)
     }
 
+    /// Appends the transactions into the graph as an atomic unit.
+    ///
+    /// These transactions can only be selected as a batch, and are reverted and pruned together.
     pub fn append_user_batch(
         &mut self,
         batch: &[Arc<AuthenticatedTransaction>],
@@ -208,7 +211,6 @@ impl TransactionGraph {
     /// _before_ calling this function. i.e. first revert expired batches and deselect their
     /// transactions, then call this.
     pub fn revert_expired(&mut self, chain_tip: BlockNumber) -> HashSet<TransactionId> {
-        // We only revert transactions which are _not_ included in batches.
         let mut to_revert = self.inner.expired(chain_tip);
         to_revert.retain(|tx| !self.inner.is_selected(tx));
 
