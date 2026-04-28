@@ -1,0 +1,23 @@
+[package]
+authors.workspace      = true
+description            = "Miden node tracing and OpenTelemetry utilities"
+edition.workspace      = true
+homepage.workspace     = true
+keywords               = ["miden", "node", "opentelemetry", "tracing"]
+license.workspace      = true
+name                   = "miden-node-tracing"
+readme                 = "README.md"
+repository.workspace   = true
+rust-version.workspace = true
+version.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+opentelemetry         = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+tracing               = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber    = { workspace = true }

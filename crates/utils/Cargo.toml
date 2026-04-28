@@ -31,9 +31,9 @@ humantime             = { workspace = true }
 itertools             = { workspace = true }
 lru                   = { workspace = true }
 miden-protocol        = { workspace = true }
-opentelemetry         = { version = "0.31" }
-opentelemetry-otlp    = { default-features = false, features = ["grpc-tonic", "tls-roots", "trace"], version = "0.31" }
-opentelemetry_sdk     = { features = ["rt-tokio", "testing"], version = "0.31" }
+opentelemetry         = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
 rand                  = { workspace = true }
 thiserror             = { workspace = true }
 tokio                 = { workspace = true }
@@ -43,7 +43,7 @@ tower-http            = { features = ["catch-panic"], workspace = true }
 tower_governor        = { version = "0.8" }
 tracing               = { workspace = true }
 tracing-forest        = { features = ["chrono"], optional = true, version = "0.3" }
-tracing-opentelemetry = { version = "0.32" }
+tracing-opentelemetry = { workspace = true }
 tracing-subscriber    = { workspace = true }
 url                   = { workspace = true }
 
