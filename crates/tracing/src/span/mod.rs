@@ -190,19 +190,19 @@ mod tests {
         }
     }
 
-    #[crate::instrument(name = "instrumented_error")]
+    #[crate::instrument(target = rpc, name = "instrumented_error")]
     fn instrumented_error(value: u32) -> Result<(), TestError> {
         let _ = value;
         Err(TestError { source: SourceError })
     }
 
-    #[crate::instrument(name = "instrumented_ok")]
+    #[crate::instrument(target = rpc, name = "instrumented_ok")]
     fn instrumented_ok(value: u32) -> Result<(), TestError> {
         let _ = value;
         Ok(())
     }
 
-    #[crate::instrument(name = "instrumented_async_error")]
+    #[crate::instrument(target = store::database, name = "instrumented_async_error")]
     async fn instrumented_async_error(value: u32) -> Result<(), TestError> {
         let _ = value;
         Err(TestError { source: SourceError })
