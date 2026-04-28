@@ -10,7 +10,14 @@ mod span;
 mod test_utils;
 
 pub use field::OpenTelemetryField;
-pub use miden_node_tracing_macro::instrument;
+pub use miden_node_tracing_macro::{
+    debug_span,
+    error_span,
+    info_span,
+    instrument,
+    trace_span,
+    warn_span,
+};
 pub use object::{OpenTelemetryObject, OpenTelemetryObjectRecorder};
 pub use span::Span;
 #[doc(hidden)]

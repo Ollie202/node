@@ -32,6 +32,24 @@ impl Span {
         self.0
     }
 
+    /// Enters this span for the current scope.
+    pub fn enter(&self) -> tracing::span::Entered<'_> {
+        self.0.enter()
+    }
+
+    /// Enters this span, consuming it and returning a guard that exits the span on drop.
+    pub fn entered(self) -> tracing::span::EnteredSpan {
+        self.0.entered()
+    }
+
+    /// Executes `f` in the context of this span.
+    pub fn in_scope<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        self.0.in_scope(f)
+    }
+
     /// Records `field` using its default key.
     pub fn record_field<F>(&self, field: &F)
     where
@@ -228,6 +246,18 @@ mod tests {
         let span = exported_span(|_| Span::current().record_field(&TestField));
 
         assert_attribute(&span, "test.field", "value");
+    }
+
+    #[test]
+    fn span_macro_creates_recordable_span() {
+        let spans = exported_spans(|| {
+            let span = crate::info_span!(target = rpc, "manual_span");
+            span.record_field(&TestField);
+            let _guard = span.entered();
+        });
+        let span = exported_span_by_name(&spans, "manual_span");
+
+        assert_attribute(span, "test.field", "value");
     }
 
     #[test]
