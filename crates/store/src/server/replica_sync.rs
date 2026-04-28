@@ -191,7 +191,7 @@ impl ProofReplicaSync {
 
         // Blocks are broadcast by apply_block internally; proofs have no equivalent path so
         // we broadcast here to forward to any downstream replicas.
-        let _ = self.proof_sender.send(ProofNotification { block_num, proof_bytes: proof });
+        let _ = self.proof_sender.send(ProofNotification::new(block_num, proof));
         Ok(())
     }
 }

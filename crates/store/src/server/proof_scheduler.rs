@@ -32,15 +32,6 @@ use crate::errors::{DatabaseError, ProofSchedulerError};
 use crate::proven_tip::ProvenTipWriter;
 use crate::server::block_prover_client::{BlockProver, StoreProverError};
 
-/// A proof notification sent to replica subscribers after a block proof is saved to disk.
-///
-/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
-#[derive(Clone, Debug)]
-pub struct ProofNotification {
-    pub block_num: BlockNumber,
-    pub proof_bytes: Vec<u8>,
-}
-
 // CONSTANTS
 // ================================================================================================
 
@@ -55,6 +46,32 @@ const MAX_PROVE_ATTEMPTS: u32 = 3;
 
 /// Default maximum number of blocks being proven concurrently.
 pub const DEFAULT_MAX_CONCURRENT_PROOFS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+
+/// A proof notification sent to replica subscribers after a block proof is saved to disk.
+///
+/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
+#[derive(Clone, Debug)]
+pub struct ProofNotification(Arc<Proof>);
+
+impl ProofNotification {
+    pub fn new(block_num: BlockNumber, proof_bytes: Vec<u8>) -> Self {
+        Self(Arc::new(Proof { block_num, proof_bytes }))
+    }
+
+    pub fn block_num(&self) -> BlockNumber {
+        self.0.block_num
+    }
+
+    pub fn proof_bytes(&self) -> &[u8] {
+        &self.0.proof_bytes
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Proof {
+    block_num: BlockNumber,
+    proof_bytes: Vec<u8>,
+}
 
 /// A wrapper around [`JoinSet`] whose `join_next` returns [`std::future::pending`] when empty
 /// instead of `None`, making it safe to use directly in `tokio::select!` without a special case.
@@ -252,7 +269,7 @@ async fn prove_block(
                     block_store.save_proof(block_num, &proof_bytes).await?;
 
                     // Notify replica subscribers. Errors mean no active subscribers.
-                    let _ = proof_sender.send(ProofNotification { block_num, proof_bytes });
+                    let _ = proof_sender.send(ProofNotification::new(block_num, proof_bytes));
 
                     // Mark the block as proven and advance the sequence in the database.
                     let tip = db.mark_proven_and_advance_sequence(block_num).await?;

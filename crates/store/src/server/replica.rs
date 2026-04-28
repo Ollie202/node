@@ -168,9 +168,9 @@ fn build_proof_stream(
 
     // Phase 2: forward live proof notifications, skipping those already covered by replay.
     let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
-        Ok(ref notification) if notification.block_num > proven_tip => Some(Ok(BlockProof {
-            block_num: notification.block_num.as_u32(),
-            proof: notification.proof_bytes.clone(),
+        Ok(notification) if notification.block_num() > proven_tip => Some(Ok(BlockProof {
+            block_num: notification.block_num().as_u32(),
+            proof: notification.proof_bytes().to_vec(),
         })),
         Ok(_) => None, // already replayed
         Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(Status::data_loss(format!(
