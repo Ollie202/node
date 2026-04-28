@@ -1,3 +1,5 @@
+mod block;
+
 use std::borrow::Cow;
 
 use opentelemetry::Key;
