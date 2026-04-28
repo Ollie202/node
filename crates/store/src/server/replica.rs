@@ -2,8 +2,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use miden_node_proto::generated::store::{
-    BlockSubscriptionRequest,
     BlockProof,
+    BlockSubscriptionRequest,
     ProofSubscriptionRequest,
     SignedBlock,
     store_replica_server,
@@ -97,7 +97,8 @@ fn build_block_stream(
     chain_tip: BlockNumber,
     state: Arc<State>,
     live_rx: tokio::sync::broadcast::Receiver<BlockNotification>,
-) -> impl tonic::codegen::tokio_stream::Stream<Item = Result<SignedBlock, Status>> + Send + 'static {
+) -> impl tonic::codegen::tokio_stream::Stream<Item = Result<SignedBlock, Status>> + Send + 'static
+{
     // Phase 1: replay historical blocks from the block store.
     let historical = tokio_stream::iter(from.as_u32()..=chain_tip.as_u32())
         .map(BlockNumber::from)
