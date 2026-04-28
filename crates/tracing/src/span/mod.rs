@@ -103,7 +103,7 @@ mod tests {
     use opentelemetry::trace::Status;
 
     use super::Span;
-    use crate::test_utils::{assert_attribute, exported_span};
+    use crate::test_utils::{assert_attribute, exported_span, exported_spans};
     use crate::{OpenTelemetryField, OpenTelemetryObject, OpenTelemetryObjectRecorder};
 
     struct TestField;
@@ -190,6 +190,24 @@ mod tests {
         }
     }
 
+    #[crate::instrument(name = "instrumented_error")]
+    fn instrumented_error(value: u32) -> Result<(), TestError> {
+        let _ = value;
+        Err(TestError { source: SourceError })
+    }
+
+    #[crate::instrument(name = "instrumented_ok")]
+    fn instrumented_ok(value: u32) -> Result<(), TestError> {
+        let _ = value;
+        Ok(())
+    }
+
+    #[crate::instrument(name = "instrumented_async_error")]
+    async fn instrumented_async_error(value: u32) -> Result<(), TestError> {
+        let _ = value;
+        Err(TestError { source: SourceError })
+    }
+
     #[test]
     fn span_records_error_status() {
         let error = TestError { source: SourceError };
@@ -210,5 +228,47 @@ mod tests {
         let span = exported_span(|_| Span::current().record_field(&TestField));
 
         assert_attribute(&span, "test.field", "value");
+    }
+
+    #[test]
+    fn instrument_macro_records_returned_errors() {
+        let spans = exported_spans(|| {
+            let result = instrumented_error(42);
+            assert!(result.is_err());
+        });
+        let span = exported_span_by_name(&spans, "instrumented_error");
+
+        assert_eq!(
+            span.status,
+            Status::Error {
+                description: "parent error\ncaused by: source error".into(),
+            }
+        );
+        assert!(!span.attributes.iter().any(|attribute| attribute.key.as_str() == "value"));
+        assert!(!span.attributes.iter().any(|attribute| attribute.key.as_str() == "error.type"));
+        assert!(span.events.events.is_empty());
+    }
+
+    #[test]
+    fn instrument_macro_leaves_success_status_unset() {
+        let spans = exported_spans(|| {
+            let result = instrumented_ok(42);
+            assert!(result.is_ok());
+        });
+        let span = exported_span_by_name(&spans, "instrumented_ok");
+
+        assert_eq!(span.status, Status::Unset);
+        assert!(!span.attributes.iter().any(|attribute| attribute.key.as_str() == "value"));
+        assert!(span.events.events.is_empty());
+    }
+
+    fn exported_span_by_name<'a>(
+        spans: &'a [opentelemetry_sdk::trace::SpanData],
+        name: &str,
+    ) -> &'a opentelemetry_sdk::trace::SpanData {
+        spans
+            .iter()
+            .find(|span| span.name == name)
+            .unwrap_or_else(|| panic!("missing span {name}; spans: {spans:?}"))
     }
 }

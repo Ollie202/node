@@ -3423,6 +3423,7 @@ dependencies = [
 name = "miden-node-tracing"
 version = "0.14.9"
 dependencies = [
+ "miden-node-tracing-macro",
  "miden-protocol",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -3430,6 +3431,15 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "miden-node-tracing-macro"
+version = "0.14.9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

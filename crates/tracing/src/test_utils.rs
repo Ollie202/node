@@ -19,23 +19,29 @@ impl SpanExporter for TestExporter {
 }
 
 pub(crate) fn exported_span(record: impl FnOnce(&Span)) -> SpanData {
-    let exporter = TestExporter::default();
-    let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
-    let tracer = provider.tracer("miden-node-tracing-test");
-    let subscriber =
-        tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-
-    tracing::subscriber::with_default(subscriber, || {
+    let spans = exported_spans(|| {
         let span = tracing::info_span!("test_span");
         let _guard = span.enter();
         let wrapped = Span::new(span.clone());
         record(&wrapped);
     });
 
-    drop(provider);
-    let spans = exporter.0.lock().expect("span exporter lock poisoned");
     assert_eq!(spans.len(), 1, "expected exactly one exported span");
     spans[0].clone()
+}
+
+pub(crate) fn exported_spans(record: impl FnOnce()) -> Vec<SpanData> {
+    let exporter = TestExporter::default();
+    let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
+    let tracer = provider.tracer("miden-node-tracing-test");
+    let subscriber =
+        tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+    tracing::subscriber::with_default(subscriber, record);
+
+    drop(provider);
+    let spans = exporter.0.lock().expect("span exporter lock poisoned");
+    spans.clone()
 }
 
 pub(crate) fn assert_attribute(span: &SpanData, key: &str, expected: impl Into<Value>) {
