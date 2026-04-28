@@ -1,4 +1,9 @@
+mod error;
+
+use std::error::Error;
+
 use opentelemetry::Key;
+use opentelemetry::trace::Status;
 
 use crate::{OpenTelemetryField, OpenTelemetryObject, OpenTelemetryObjectRecorder};
 
@@ -23,6 +28,11 @@ pub trait OpenTelemetrySpanExt {
     fn record_object_as<O>(&self, object: &O, key_prefix: &str)
     where
         O: OpenTelemetryObject + ?Sized;
+
+    /// Records `error` on this span by setting the span status to error.
+    fn record_error<E>(&self, error: &E)
+    where
+        E: Error + ?Sized;
 }
 
 impl OpenTelemetrySpanExt for tracing::Span {
@@ -58,10 +68,27 @@ impl OpenTelemetrySpanExt for tracing::Span {
         let mut recorder = OpenTelemetryObjectRecorder::new(self, key_prefix);
         object.record_otel_fields(&mut recorder);
     }
+
+    fn record_error<E>(&self, error: &E)
+    where
+        E: Error + ?Sized,
+    {
+        tracing_opentelemetry::OpenTelemetrySpanExt::set_status(
+            self,
+            Status::Error {
+                description: error::error_report(error).into(),
+            },
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+    use std::fmt;
+
+    use opentelemetry::trace::Status;
+
     use super::OpenTelemetrySpanExt;
     use crate::test_utils::{assert_attribute, exported_span};
     use crate::{OpenTelemetryField, OpenTelemetryObject, OpenTelemetryObjectRecorder};
@@ -120,5 +147,48 @@ mod tests {
         assert_attribute(&span, "test.nested.field", "value");
         assert_attribute(&span, "custom.field", "value");
         assert_attribute(&span, "custom.nested.field", "value");
+    }
+
+    #[derive(Debug)]
+    struct SourceError;
+
+    impl fmt::Display for SourceError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("source error")
+        }
+    }
+
+    impl Error for SourceError {}
+
+    #[derive(Debug)]
+    struct TestError {
+        source: SourceError,
+    }
+
+    impl fmt::Display for TestError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("parent error")
+        }
+    }
+
+    impl Error for TestError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    #[test]
+    fn span_extension_records_error_status() {
+        let error = TestError { source: SourceError };
+        let span = exported_span(|span| span.record_error(&error));
+
+        assert_eq!(
+            span.status,
+            Status::Error {
+                description: "parent error\ncaused by: source error".into(),
+            }
+        );
+        assert!(!span.attributes.iter().any(|attribute| attribute.key.as_str() == "error.type"));
+        assert!(span.events.events.is_empty());
     }
 }

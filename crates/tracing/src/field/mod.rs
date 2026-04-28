@@ -1,5 +1,5 @@
-pub(crate) mod word;
 mod protocol;
+pub(crate) mod word;
 
 use opentelemetry::Value;
 
