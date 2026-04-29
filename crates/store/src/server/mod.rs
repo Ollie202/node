@@ -320,8 +320,6 @@ impl Store {
             .build_v1()
             .context("failed to build reflection service")?;
 
-        info!(target: COMPONENT, "Database loaded");
-
         let make_server = || {
             tonic::transport::Server::builder()
                 .timeout(grpc_options.request_timeout)
@@ -374,8 +372,6 @@ impl Store {
             .register_file_descriptor_set(store_api_descriptor())
             .build_v1()
             .context("failed to build reflection service")?;
-
-        info!(target: COMPONENT, "Database loaded");
 
         join_set.spawn(
             tonic::transport::Server::builder()
