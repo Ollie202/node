@@ -10,14 +10,10 @@ use miden_node_proto::generated::store::{
     store_replica_client,
 };
 use miden_protocol::block::{BlockNumber, SignedBlock};
-use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
-use tracing::{info, instrument, warn};
+use tracing::{info, warn};
 use url::Url;
 
-use crate::COMPONENT;
-use crate::proven_tip::ProvenTipWriter;
-use crate::server::proof_scheduler::ProofNotification;
 use crate::state::{Finality, State};
 
 pub(crate) const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -112,12 +108,9 @@ impl ReplicaSync for BlockReplicaSync {
             .into_inner();
 
         while let Some(result) = stream.next().await {
-            // Deserialize the block.
             let event = result?;
             let block = SignedBlock::read_from_bytes(&event.block)
                 .context("failed to deserialize block from upstream")?;
-
-            // Apply the block to the local state.
             self.state.apply_block(block, None).await?;
         }
 
@@ -132,23 +125,11 @@ impl ReplicaSync for BlockReplicaSync {
 pub struct ProofReplicaSync {
     state: Arc<State>,
     upstream_url: Url,
-    proven_tip: ProvenTipWriter,
-    proof_sender: broadcast::Sender<ProofNotification>,
 }
 
 impl ProofReplicaSync {
-    pub fn new(
-        state: Arc<State>,
-        upstream_url: Url,
-        proven_tip: ProvenTipWriter,
-        proof_sender: broadcast::Sender<ProofNotification>,
-    ) -> Self {
-        Self {
-            state,
-            upstream_url,
-            proven_tip,
-            proof_sender,
-        }
+    pub fn new(state: Arc<State>, upstream_url: Url) -> Self {
+        Self { state, upstream_url }
     }
 }
 
@@ -170,28 +151,11 @@ impl ReplicaSync for ProofReplicaSync {
             .into_inner();
 
         while let Some(result) = stream.next().await {
-            // Deserialize the proof.
             let event = result?;
             let block_num = BlockNumber::from(event.block_num);
-
-            // Store the proof.
-            self.apply_proof(block_num, event.proof).await?;
+            self.state.apply_proof(block_num, event.proof).await?;
         }
 
-        Ok(())
-    }
-}
-
-impl ProofReplicaSync {
-    #[instrument(target = COMPONENT, skip_all, err, fields(block.number = block_num.as_u32()))]
-    async fn apply_proof(&self, block_num: BlockNumber, proof: Vec<u8>) -> anyhow::Result<()> {
-        self.state.block_store().save_proof(block_num, &proof).await?;
-        let tip = self.state.db().mark_proven_and_advance_sequence(block_num).await?;
-        self.proven_tip.advance(tip);
-
-        // Blocks are broadcast by apply_block internally; proofs have no equivalent path so
-        // we broadcast here to forward to any downstream replicas.
-        let _ = self.proof_sender.send(ProofNotification::new(block_num, proof));
         Ok(())
     }
 }

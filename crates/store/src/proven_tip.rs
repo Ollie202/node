@@ -20,6 +20,11 @@ impl ProvenTipWriter {
         (Self(Arc::clone(&inner)), ProvenTipReader(inner))
     }
 
+    /// Returns the current proven chain tip.
+    pub fn read(&self) -> BlockNumber {
+        BlockNumber::from(self.0.load(Ordering::Acquire))
+    }
+
     /// Advances the tip to `new_tip` if it is greater than the current value.
     ///
     /// This is a no-op when `new_tip` is less than or equal to the existing tip.

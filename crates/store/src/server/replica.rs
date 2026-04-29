@@ -15,8 +15,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tonic::{Request, Response, Status};
 
 use crate::server::api::StoreApi;
-use crate::server::proof_scheduler::ProofNotification;
-use crate::state::{BlockNotification, Finality, State};
+use crate::state::{BlockNotification, Finality, ProofNotification, State};
 
 // STORE REPLICA API
 // ================================================================================================

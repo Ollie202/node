@@ -1,0 +1,27 @@
+use miden_protocol::block::BlockNumber;
+use tracing::instrument;
+
+use crate::COMPONENT;
+use crate::state::{ProofNotification, State};
+
+impl State {
+    /// Saves a block proof, advances the proven-in-sequence tip, and notifies replica subscribers.
+    ///
+    /// Only used in when the store is running in replica mode.
+    #[instrument(target = COMPONENT, skip_all, err, fields(block.number = block_num.as_u32()))]
+    pub async fn apply_proof(
+        &self,
+        block_num: BlockNumber,
+        proof_bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        self.block_store.save_proof(block_num, &proof_bytes).await?;
+        let tip = self.db.mark_proven_and_advance_sequence(block_num).await?;
+        self.proven_tip.advance(tip);
+
+        // Proof notifications are broadcast here so downstream replicas receive them. Errors
+        // indicate no active subscribers, which is fine.
+        let _ = self.proof_sender.send(ProofNotification::new(block_num, proof_bytes));
+
+        Ok(())
+    }
+}

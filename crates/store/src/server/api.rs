@@ -16,8 +16,7 @@ use tracing::{info, instrument};
 
 use crate::COMPONENT;
 use crate::errors::GetBlockInputsError;
-use crate::server::proof_scheduler::ProofNotification;
-use crate::state::{BlockNotification, State};
+use crate::state::{BlockNotification, ProofNotification, State};
 
 // STORE API
 // ================================================================================================

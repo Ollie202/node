@@ -24,7 +24,7 @@ use crate::errors::ApplyBlockError;
 use crate::genesis::GenesisBlock;
 use crate::proven_tip::ProvenTipWriter;
 use crate::server::replica_sync::{BlockReplicaSync, ProofReplicaSync};
-use crate::state::State;
+use crate::state::{BlockNotification, ProofNotification, State};
 use crate::{BlockProver, COMPONENT};
 
 mod api;
@@ -37,12 +37,6 @@ use replica_sync::ReplicaSync as _;
 pub mod proof_scheduler;
 mod replica;
 mod rpc_api;
-
-/// Broadcast channel capacity for replica proof notifications.
-///
-/// 512 slots gives replicas ~512 proofs of buffer during historical replay before
-/// the sender considers them lagged. On lag, the replica should reconnect.
-const PROOF_BROADCAST_CAPACITY: usize = 512;
 
 /// Determines how the store receives new blocks.
 ///
@@ -130,12 +124,10 @@ impl Store {
 
         let (termination_ask, mut termination_signal) =
             tokio::sync::mpsc::channel::<ApplyBlockError>(1);
-        let (state, tx_proven_tip, block_sender) =
+        let (state, tx_proven_tip, block_sender, proof_sender) =
             State::load(&self.data_directory, self.storage_options, termination_ask)
                 .await
                 .context("failed to load state")?;
-
-        let (proof_sender, _) = broadcast::channel(PROOF_BROADCAST_CAPACITY);
 
         let ModeSetup { mut grpc_servers, mode_task } = match self.mode {
             StoreMode::BlockProducer {
@@ -161,7 +153,6 @@ impl Store {
             StoreMode::Replica { upstream_url } => Self::setup_replica_mode(
                 state,
                 upstream_url,
-                tx_proven_tip,
                 block_sender,
                 proof_sender,
                 self.grpc_options,
@@ -198,7 +189,7 @@ impl Store {
         max_concurrent_proofs: NonZeroUsize,
         tx_proven_tip: ProvenTipWriter,
         block_sender: broadcast::Sender<crate::state::BlockNotification>,
-        proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
+        proof_sender: broadcast::Sender<ProofNotification>,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
     ) -> anyhow::Result<ModeSetup> {
@@ -241,9 +232,8 @@ impl Store {
     fn setup_replica_mode(
         state: State,
         upstream_url: Url,
-        proven_tip: ProvenTipWriter,
-        block_sender: broadcast::Sender<crate::state::BlockNotification>,
-        proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
+        block_sender: broadcast::Sender<BlockNotification>,
+        proof_sender: broadcast::Sender<ProofNotification>,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
     ) -> anyhow::Result<ModeSetup> {
@@ -251,13 +241,7 @@ impl Store {
 
         let state = Arc::new(state);
         let block_handle = BlockReplicaSync::new(Arc::clone(&state), upstream_url.clone()).spawn();
-        let proof_handle = ProofReplicaSync::new(
-            Arc::clone(&state),
-            upstream_url,
-            proven_tip,
-            proof_sender.clone(),
-        )
-        .spawn();
+        let proof_handle = ProofReplicaSync::new(Arc::clone(&state), upstream_url).spawn();
         let replica_task = tokio::spawn(async move {
             tokio::select! {
                 result = block_handle => result?,
@@ -283,7 +267,7 @@ impl Store {
         block_prover_url: Option<Url>,
         max_concurrent_proofs: NonZeroUsize,
         proven_tip: ProvenTipWriter,
-        proof_sender: broadcast::Sender<proof_scheduler::ProofNotification>,
+        proof_sender: broadcast::Sender<ProofNotification>,
     ) -> (
         tokio::task::JoinHandle<anyhow::Result<()>>,
         watch::Sender<miden_protocol::block::BlockNumber>,

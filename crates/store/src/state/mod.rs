@@ -52,34 +52,8 @@ use crate::errors::{
     GetCurrentBlockchainDataError,
     StateInitializationError,
 };
-use crate::proven_tip::{ProvenTipReader, ProvenTipWriter};
+use crate::proven_tip::ProvenTipWriter;
 use crate::{COMPONENT, DataDirectory};
-
-/// A committed block notification sent to replica subscribers via broadcast channel.
-///
-/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
-#[derive(Clone, Debug)]
-pub struct BlockNotification(Arc<Block>);
-
-impl BlockNotification {
-    pub fn new(block_num: BlockNumber, block_bytes: Vec<u8>) -> Self {
-        Self(Arc::new(Block { block_num, block_bytes }))
-    }
-
-    pub fn block_num(&self) -> BlockNumber {
-        self.0.block_num
-    }
-
-    pub fn block_bytes(&self) -> &[u8] {
-        &self.0.block_bytes
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Block {
-    pub block_num: BlockNumber,
-    pub block_bytes: Vec<u8>,
-}
 
 /// Broadcast channel capacity for replica block notifications.
 ///
@@ -87,8 +61,13 @@ pub struct Block {
 /// the sender considers them lagged. On lag, the replica should reconnect.
 const BLOCK_BROADCAST_CAPACITY: usize = 512;
 
-mod loader;
+/// Broadcast channel capacity for replica proof notifications.
+///
+/// 512 slots gives replicas ~512 proofs of buffer during historical replay before
+/// the sender considers them lagged. On lag, the replica should reconnect.
+const PROOF_BROADCAST_CAPACITY: usize = 512;
 
+mod loader;
 use loader::{
     ACCOUNT_TREE_STORAGE_DIR,
     NULLIFIER_TREE_STORAGE_DIR,
@@ -99,7 +78,11 @@ use loader::{
     verify_tree_consistency,
 };
 
+mod notifications;
+pub use notifications::{BlockNotification, ProofNotification};
+
 mod apply_block;
+mod apply_proof;
 mod sync_state;
 
 // FINALITY
@@ -171,12 +154,17 @@ pub struct State {
     /// Request termination of the process due to a fatal internal state error.
     termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
 
-    /// The latest proven-in-sequence block number, updated by the proof scheduler.
-    proven_tip: ProvenTipReader,
+    /// The latest proven-in-sequence block number, updated by the proof scheduler or
+    /// `apply_proof`.
+    proven_tip: ProvenTipWriter,
 
     /// Broadcast sender for replica block notifications. Fired after each block is committed.
     /// Replicas subscribe to receive a live stream without polling.
     pub(crate) block_sender: broadcast::Sender<BlockNotification>,
+
+    /// Broadcast sender for replica proof notifications. Fired after each proof is saved.
+    /// Replicas subscribe to receive a live stream without polling.
+    pub(crate) proof_sender: broadcast::Sender<ProofNotification>,
 }
 
 impl State {
@@ -185,17 +173,22 @@ impl State {
 
     /// Loads the state from the data directory.
     ///
-    /// Returns `(Self, ProvenTipWriter, block_sender)`.
+    /// Returns `(Self, ProvenTipWriter, block_sender, proof_sender)`.
     ///
-    /// `block_sender` is a [`broadcast::Sender`] that fires with each committed block. Callers
-    /// can call `.subscribe()` on it to receive a [`broadcast::Receiver`] for replica streaming.
+    /// `block_sender` fires with each committed block; `proof_sender` fires with each saved proof.
+    /// Callers can call `.subscribe()` on either to receive a stream for replica streaming.
     #[instrument(target = COMPONENT, skip_all)]
     pub async fn load(
         data_path: &Path,
         storage_options: StorageOptions,
         termination_ask: tokio::sync::mpsc::Sender<ApplyBlockError>,
     ) -> Result<
-        (Self, ProvenTipWriter, broadcast::Sender<BlockNotification>),
+        (
+            Self,
+            ProvenTipWriter,
+            broadcast::Sender<BlockNotification>,
+            broadcast::Sender<ProofNotification>,
+        ),
         StateInitializationError,
     > {
         let data_directory = DataDirectory::load(data_path.to_path_buf())
@@ -246,12 +239,13 @@ impl State {
         let db = Arc::new(db);
 
         // Initialize the proven tip from database.
-        let proven_tip =
+        let proven_tip_init =
             db.proven_chain_tip().await.map_err(StateInitializationError::DatabaseError)?;
-        let (proven_tip_writer, proven_tip) = ProvenTipWriter::new(proven_tip);
+        let (proven_tip, _reader) = ProvenTipWriter::new(proven_tip_init);
 
-        // Create the block broadcast channel for replica sync.
+        // Create broadcast channels for replica sync.
         let (block_sender, _) = broadcast::channel(BLOCK_BROADCAST_CAPACITY);
+        let (proof_sender, _) = broadcast::channel(PROOF_BROADCAST_CAPACITY);
 
         Ok((
             Self {
@@ -261,11 +255,13 @@ impl State {
                 forest,
                 writer,
                 termination_ask,
-                proven_tip,
+                proven_tip: proven_tip.clone(),
                 block_sender: block_sender.clone(),
+                proof_sender: proof_sender.clone(),
             },
-            proven_tip_writer,
+            proven_tip,
             block_sender,
+            proof_sender,
         ))
     }
 
@@ -925,7 +921,7 @@ impl State {
                 .instrument(tracing::info_span!("acquire_inner"))
                 .await
                 .latest_block_num(),
-            Finality::Proven => self.proven_tip.read(),
+            Finality::Proven => self.proven_tip.read(), // ProvenTipWriter also has read()
         }
     }
 
