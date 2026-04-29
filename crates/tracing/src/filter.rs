@@ -259,14 +259,21 @@ impl From<reload::Error> for DynamicFilterError {
 }
 
 impl Layer<Registry> for DynamicFilterLayer {
+    /// Forwards dispatch registration to the wrapped reload layer.
     fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
         self.inner.on_register_dispatch(subscriber);
     }
 
+    /// Forwards layer installation to the wrapped reload layer.
     fn on_layer(&mut self, subscriber: &mut Registry) {
         self.inner.on_layer(subscriber);
     }
 
+    /// Registers callsites for allowed application targets and internal plumbing.
+    ///
+    /// Internal control-plane callsites must remain available even when the user-facing filter is
+    /// `off`, otherwise panic capture and similar crate-owned signals could be disabled by the
+    /// runtime admin filter.
     fn register_callsite(
         &self,
         metadata: &'static tracing::Metadata<'static>,
@@ -280,11 +287,19 @@ impl Layer<Registry> for DynamicFilterLayer {
         }
     }
 
+    /// Applies the runtime filter to application telemetry while allowing internal plumbing.
+    ///
+    /// This layer is the global target gate. Internal control-plane records bypass it so they can
+    /// be consumed by crate-owned layers independently of the user-selected trace verbosity.
     fn enabled(&self, metadata: &tracing::Metadata<'_>, ctx: Context<'_, Registry>) -> bool {
         internal::is_internal_target(metadata.target())
             || (is_own_target(metadata.target()) && self.inner.enabled(metadata, ctx))
     }
 
+    /// Forwards span creation for allowed application targets.
+    ///
+    /// Internal fallback spans are enabled by this layer, but the wrapped `EnvFilter` does not need
+    /// to track them because internal routing is handled by the tracing crate's own layers.
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
@@ -296,6 +311,7 @@ impl Layer<Registry> for DynamicFilterLayer {
         }
     }
 
+    /// Forwards span field updates to the wrapped reload layer.
     fn on_record(
         &self,
         span: &tracing::span::Id,
@@ -305,6 +321,7 @@ impl Layer<Registry> for DynamicFilterLayer {
         self.inner.on_record(span, values, ctx);
     }
 
+    /// Forwards causal span relationships to the wrapped reload layer.
     fn on_follows_from(
         &self,
         span: &tracing::span::Id,
@@ -314,29 +331,41 @@ impl Layer<Registry> for DynamicFilterLayer {
         self.inner.on_follows_from(span, follows, ctx);
     }
 
+    /// Applies event-level filtering while preserving internal control-plane delivery.
+    ///
+    /// Some filters make decisions after seeing event metadata. Internal events bypass that path so
+    /// operational plumbing cannot be disabled accidentally by a user directive.
     fn event_enabled(&self, event: &tracing::Event<'_>, ctx: Context<'_, Registry>) -> bool {
         internal::is_internal_target(event.metadata().target())
             || (is_own_target(event.metadata().target()) && self.inner.event_enabled(event, ctx))
     }
 
+    /// Forwards user-facing events to the wrapped reload layer.
+    ///
+    /// Internal events are deliberately not forwarded to the user filter layer; they are consumed
+    /// by crate-owned layers and filtered from normal output/export layers.
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, Registry>) {
         if is_own_target(event.metadata().target()) {
             self.inner.on_event(event, ctx);
         }
     }
 
+    /// Forwards span enter notifications to the wrapped reload layer.
     fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, Registry>) {
         self.inner.on_enter(id, ctx);
     }
 
+    /// Forwards span exit notifications to the wrapped reload layer.
     fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, Registry>) {
         self.inner.on_exit(id, ctx);
     }
 
+    /// Forwards span close notifications to the wrapped reload layer.
     fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, Registry>) {
         self.inner.on_close(id, ctx);
     }
 
+    /// Forwards span id changes to the wrapped reload layer.
     fn on_id_change(
         &self,
         old: &tracing::span::Id,
@@ -346,6 +375,11 @@ impl Layer<Registry> for DynamicFilterLayer {
         self.inner.on_id_change(old, new, ctx);
     }
 
+    /// Avoids a restrictive global level hint.
+    ///
+    /// The runtime filter may currently be `off`, but internal control-plane records must still be
+    /// able to emit. Returning `None` asks `tracing` to consult `enabled`/`event_enabled` instead
+    /// of globally pruning callsites by a static max-level hint.
     fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
         None
     }
