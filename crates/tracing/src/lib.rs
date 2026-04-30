@@ -15,6 +15,8 @@ mod filter;
 mod internal;
 mod object;
 mod span;
+#[expect(dead_code, reason = "wired into subscriber setup once this crate owns that path")]
+mod stdout;
 mod user;
 
 #[cfg(test)]

@@ -85,6 +85,26 @@ impl Span {
         );
     }
 
+    /// Records `field` as both an OpenTelemetry attribute and a user-facing log field.
+    ///
+    /// User-facing fields are explicitly selected to keep local stdout logs focused. The stored
+    /// attribute key is prefixed so exporters can strip the marker prefix for display while still
+    /// distinguishing these fields from trace-only attributes.
+    pub fn record_user_field<F>(&self, field: &F)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.record_user_field_as(field, F::DEFAULT_KEY);
+    }
+
+    /// Records `field` as a user-facing log field using `key` instead of its default key.
+    pub fn record_user_field_as<F>(&self, field: &F, key: impl Into<Key>)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.record_field_as(field, crate::user::field_key(key));
+    }
+
     /// Records `object` using its default key prefix.
     pub fn record_object<O>(&self, object: &O)
     where
@@ -193,6 +213,17 @@ mod tests {
 
         assert_attribute(&span, "test.field", "value");
         assert_attribute(&span, "custom.field", "value");
+    }
+
+    #[test]
+    fn span_records_user_fields_with_prefixed_keys() {
+        let span = exported_span(|span| {
+            span.record_user_field(&TestField);
+            span.record_user_field_as(&TestField, "custom.field");
+        });
+
+        assert_attribute(&span, "miden.user.test.field", "value");
+        assert_attribute(&span, "miden.user.custom.field", "value");
     }
 
     #[test]

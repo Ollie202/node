@@ -67,6 +67,26 @@ impl Event {
         self.with_recorder(|recorder| recorder.record_field_as(field, key));
     }
 
+    /// Records `field` as both an OpenTelemetry attribute and a user-facing log field.
+    ///
+    /// User-facing fields are explicitly selected to keep local stdout logs focused. The stored
+    /// attribute key is prefixed so exporters can strip the marker prefix for display while still
+    /// distinguishing these fields from trace-only attributes.
+    pub fn record_user_field<F>(&self, field: &F)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.with_recorder(|recorder| recorder.record_user_field(field));
+    }
+
+    /// Records `field` as a user-facing log field using `key` instead of its default key.
+    pub fn record_user_field_as<F>(&self, field: &F, key: impl Into<Key>)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.with_recorder(|recorder| recorder.record_user_field_as(field, key));
+    }
+
     /// Records `object` using its default key prefix.
     pub fn record_object<O>(&self, object: &O)
     where
@@ -159,6 +179,22 @@ impl OpenTelemetryEventRecorder {
         F: OpenTelemetryField + ?Sized,
     {
         self.attributes.push(KeyValue::new(key, field.to_otel_value()));
+    }
+
+    /// Records `field` as both an OpenTelemetry attribute and a user-facing log field.
+    pub fn record_user_field<F>(&mut self, field: &F)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.record_user_field_as(field, F::DEFAULT_KEY);
+    }
+
+    /// Records `field` as a user-facing log field using `key` instead of its default key.
+    pub fn record_user_field_as<F>(&mut self, field: &F, key: impl Into<Key>)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.record_field_as(field, crate::user::field_key(key));
     }
 
     /// Records `object` using its default key prefix.
@@ -257,12 +293,16 @@ mod tests {
 
         recorder.record_field(&TestField);
         recorder.record_field_as(&TestField, "custom.field");
+        recorder.record_user_field(&TestField);
+        recorder.record_user_field_as(&TestField, "custom_user.field");
         recorder.record_object(&TestObject);
         recorder.record_object_as(&TestObject, "custom_object");
 
         let attributes = recorder.into_attributes();
         assert_attribute(&attributes, "field.default", "value");
         assert_attribute(&attributes, "custom.field", "value");
+        assert_attribute(&attributes, "miden.user.field.default", "value");
+        assert_attribute(&attributes, "miden.user.custom_user.field", "value");
         assert_attribute(&attributes, "object.field", "value");
         assert_attribute(&attributes, "custom_object.field", "value");
     }
@@ -281,6 +321,8 @@ mod tests {
             );
             event.record_field(&TestField);
             event.record_field_as(&TestField, "custom.field");
+            event.record_user_field(&TestField);
+            event.record_user_field_as(&TestField, "custom_user.field");
             event.record_object(&TestObject);
             event.record_object_as(&TestObject, "custom_object");
             event.emit();
@@ -307,6 +349,8 @@ mod tests {
         assert_attribute(&event.attributes, crate::user::ATTRIBUTE_KEY, true);
         assert_attribute(&event.attributes, "field.default", "value");
         assert_attribute(&event.attributes, "custom.field", "value");
+        assert_attribute(&event.attributes, "miden.user.field.default", "value");
+        assert_attribute(&event.attributes, "miden.user.custom_user.field", "value");
         assert_attribute(&event.attributes, "object.field", "value");
         assert_attribute(&event.attributes, "custom_object.field", "value");
         assert_registered_event("rpc", SpanLevel::Info, "recorded event", true);
