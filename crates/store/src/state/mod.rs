@@ -925,7 +925,7 @@ impl State {
                 .instrument(tracing::info_span!("acquire_inner"))
                 .await
                 .latest_block_num(),
-            Finality::Proven => self.proven_tip.read(), // ProvenTipWriter also has read()
+            Finality::Proven => self.proven_tip.read(),
         }
     }
 
