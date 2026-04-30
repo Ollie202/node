@@ -1,5 +1,6 @@
 pub mod clap;
 pub mod cors;
+pub mod fifo_cache;
 pub mod crypto;
 #[cfg(feature = "testing")]
 pub mod fee;

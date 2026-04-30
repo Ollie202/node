@@ -1,13 +1,13 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use miden_node_utils::fifo_cache::FifoCache;
 use miden_protocol::block::BlockNumber;
 
 // BLOCK NOTIFICATION
 // ================================================================================================
 
-/// A committed block notification sent to replica subscribers via broadcast channel.
-///
-/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
+/// A committed block notification stored in the [`BlockCache`].
 #[derive(Clone, Debug)]
 pub struct BlockNotification(Arc<Block>);
 
@@ -26,7 +26,7 @@ impl BlockNotification {
 }
 
 #[derive(Clone, Debug)]
-pub struct Block {
+struct Block {
     pub block_num: BlockNumber,
     pub block_bytes: Vec<u8>,
 }
@@ -34,9 +34,7 @@ pub struct Block {
 // PROOF NOTIFICATION
 // ================================================================================================
 
-/// A proven block notification sent to replica subscribers via broadcast channel.
-///
-/// Wrapped in `Arc` at the sender so all receivers share the same allocation.
+/// A proven block notification stored in the [`ProofCache`].
 #[derive(Clone, Debug)]
 pub struct ProofNotification(Arc<Proof>);
 
@@ -58,4 +56,23 @@ impl ProofNotification {
 struct Proof {
     block_num: BlockNumber,
     proof_bytes: Vec<u8>,
+}
+
+// CACHES
+// ================================================================================================
+
+/// FIFO cache of recent committed blocks for replica subscriptions.
+pub type BlockCache = FifoCache<BlockNumber, BlockNotification>;
+
+/// FIFO cache of recent block proofs for replica subscriptions.
+pub type ProofCache = FifoCache<BlockNumber, ProofNotification>;
+
+/// Creates a new [`BlockCache`] with the given capacity.
+pub fn new_block_cache(capacity: NonZeroUsize) -> BlockCache {
+    FifoCache::new(capacity)
+}
+
+/// Creates a new [`ProofCache`] with the given capacity.
+pub fn new_proof_cache(capacity: NonZeroUsize) -> ProofCache {
+    FifoCache::new(capacity)
 }

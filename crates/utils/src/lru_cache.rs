@@ -36,3 +36,55 @@ where
         self.0.lock().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::LruCache;
+
+    fn cache(cap: usize) -> LruCache<u32, &'static str> {
+        LruCache::new(NonZeroUsize::new(cap).unwrap())
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_on_empty_cache() {
+        let c = cache(4);
+        assert_eq!(c.get(&1).await, None);
+    }
+
+    #[tokio::test]
+    async fn get_returns_inserted_value() {
+        let c = cache(4);
+        c.put(1, "a").await;
+        assert_eq!(c.get(&1).await, Some("a"));
+    }
+
+    #[tokio::test]
+    async fn evicts_least_recently_used_when_full() {
+        let c = cache(2);
+        c.put(1, "a").await;
+        c.put(2, "b").await;
+        c.get(&1).await; // 1 is now most recently used
+        c.put(3, "c").await; // evicts 2 (least recently used)
+        assert_eq!(c.get(&1).await, Some("a"));
+        assert_eq!(c.get(&2).await, None);
+        assert_eq!(c.get(&3).await, Some("c"));
+    }
+
+    #[tokio::test]
+    async fn put_overwrites_existing_value() {
+        let c = cache(4);
+        c.put(1, "a").await;
+        c.put(1, "b").await;
+        assert_eq!(c.get(&1).await, Some("b"));
+    }
+
+    #[tokio::test]
+    async fn clone_shares_state() {
+        let c1 = cache(4);
+        let c2 = c1.clone();
+        c1.put(1, "a").await;
+        assert_eq!(c2.get(&1).await, Some("a"));
+    }
+}

@@ -11,14 +11,13 @@ use miden_node_proto::generated::store::{
 };
 use miden_protocol::block::BlockNumber;
 use pin_project::pin_project;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::{Stream, StreamExt as _};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
+use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::server::api::StoreApi;
-use crate::state::{BlockNotification, Finality, ProofNotification, State};
+use crate::state::{BlockCache, ProofCache, State};
 
 // GUARDED STREAM
 // ================================================================================================
@@ -62,16 +61,10 @@ impl store_replica_server::StoreReplica for StoreApi {
 
     /// Streams committed blocks to a replica starting from `from_block_number`.
     ///
-    /// Two-phase approach:
-    /// 1. Subscribe to the live broadcast channel BEFORE starting replay to avoid the race where a
-    ///    block is committed between the end of replay and the start of live forwarding.
-    /// 2. Replay historical blocks from the block store up to the chain tip at subscription time.
-    /// 3. Drain any broadcast messages that arrived during replay, skipping already-replayed
-    ///    blocks.
-    /// 4. Forward live blocks from the broadcast channel indefinitely.
-    ///
-    /// On lag (replica falls more than 512 blocks behind), the stream closes with `DATA_LOSS` and
-    /// the client should reconnect from its local tip.
+    /// Subscribes to the committed-tip watch channel and maintains a sequential counter. On each
+    /// tip advance it emits all blocks from the current position up to the new tip, falling back to
+    /// the block store for any entry not in the in-memory cache. The stream closes only when the
+    /// client disconnects or the server shuts down.
     async fn block_subscription(
         &self,
         request: Request<BlockSubscriptionRequest>,
@@ -82,23 +75,20 @@ impl store_replica_server::StoreReplica for StoreApi {
 
         let from = BlockNumber::from(request.into_inner().block_from);
 
-        // chain_tip is async in this branch (acquires the inner RwLock).
-        let chain_tip = self.state.chain_tip(Finality::Committed).await;
-
-        // Subscribe to the live broadcast BEFORE replay to eliminate the gap race.
-        let live_rx = self.block_sender.subscribe();
-
-        let stream = build_block_stream(from, chain_tip, Arc::clone(&self.state), live_rx);
+        let stream = build_block_stream(
+            from,
+            self.block_cache.clone(),
+            self.committed_tip_rx.clone(),
+            Arc::clone(&self.state),
+        );
         Ok(Response::new(Box::pin(GuardedStream { inner: stream, _permit: permit })))
     }
 
     /// Streams block proofs to a replica starting from `from_block_number`.
     ///
-    /// Uses the same two-phase approach as [`Self::subscribe_blocks`]: subscribe first, replay
-    /// historical proofs from disk, then forward live proof notifications.
-    ///
-    /// Blocks that are not yet proven are skipped during historical replay; the replica will
-    /// receive their proofs via the live stream once proving completes.
+    /// Uses the same watch-channel approach as [`Self::block_subscription`]: waits for the
+    /// proven-in-sequence tip to advance, then emits all proofs from the current position up to
+    /// the new tip, falling back to the block store for cache misses.
     async fn proof_subscription(
         &self,
         request: Request<ProofSubscriptionRequest>,
@@ -108,12 +98,13 @@ impl store_replica_server::StoreReplica for StoreApi {
             .map_err(|_| Status::resource_exhausted("maximum proof subscriptions reached"))?;
 
         let from = BlockNumber::from(request.into_inner().block_from);
-        let proven_tip = self.state.chain_tip(Finality::Proven).await;
 
-        // Subscribe to the live broadcast BEFORE replay.
-        let live_rx = self.proof_sender.subscribe();
-
-        let stream = build_proof_stream(from, proven_tip, Arc::clone(&self.state), live_rx);
+        let stream = build_proof_stream(
+            from,
+            self.proof_cache.clone(),
+            self.proven_tip_rx.clone(),
+            Arc::clone(&self.state),
+        );
         Ok(Response::new(Box::pin(GuardedStream { inner: stream, _permit: permit })))
     }
 }
@@ -121,92 +112,140 @@ impl store_replica_server::StoreReplica for StoreApi {
 // STREAM BUILDERS
 // ================================================================================================
 
-/// Builds the two-phase block stream: historic replay followed by live broadcast forwarding.
+/// Spawns the block-stream task and returns its output as a [`ReceiverStream`].
 fn build_block_stream(
     from: BlockNumber,
-    chain_tip: BlockNumber,
+    cache: BlockCache,
+    tip_rx: watch::Receiver<BlockNumber>,
     state: Arc<State>,
-    live_rx: tokio::sync::broadcast::Receiver<BlockNotification>,
-) -> impl tonic::codegen::tokio_stream::Stream<Item = Result<SignedBlock, Status>> + Send + 'static
-{
-    // Phase 1: replay historical blocks from the block store.
-    let historical = tokio_stream::iter(from.as_u32()..=chain_tip.as_u32())
-        .map(BlockNumber::from)
-        .then(move |block_num| {
-            let state = Arc::clone(&state);
-            async move {
-                let bytes = state
-                    .load_block(block_num)
-                    .await
-                    .map_err(|e| {
-                        Status::internal(format!(
-                            "failed to load block {}: {e}",
-                            block_num.as_u32()
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        Status::not_found(format!("block {} not found", block_num.as_u32()))
-                    })?;
-                Ok(SignedBlock { block: bytes })
-            }
-        });
-
-    // Phase 2: forward live blocks, skipping any already covered by the replay.
-    // filter_map in tokio_stream is synchronous.
-    let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
-        Ok(ref notification) if notification.block_num() > chain_tip => Some(Ok(SignedBlock {
-            block: notification.block_bytes().to_vec(),
-        })),
-        Ok(_) => None, // already replayed
-        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(Status::data_loss(format!(
-            "replica lagged by {n} blocks; reconnect from your local tip"
-        )))),
+) -> impl Stream<Item = Result<SignedBlock, Status>> + Send + 'static {
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        if let Err(status) = run_block_stream(from, cache, tip_rx, state, &tx).await {
+            // Error indicates client disconnected, which is not an error on our side.
+            let _ = tx.send(Err(status)).await;
+        }
     });
-
-    historical.chain(live)
+    ReceiverStream::new(rx)
 }
 
-/// Builds the two-phase proof stream: historic replay from disk followed by live broadcast.
+/// Spawns the proof-stream task and returns its output as a [`ReceiverStream`].
 fn build_proof_stream(
     from: BlockNumber,
-    proven_tip: BlockNumber,
+    cache: ProofCache,
+    tip_rx: watch::Receiver<BlockNumber>,
     state: Arc<State>,
-    live_rx: tokio::sync::broadcast::Receiver<ProofNotification>,
-) -> impl tonic::codegen::tokio_stream::Stream<Item = Result<BlockProof, Status>> + Send + 'static {
-    // Phase 1: replay existing proofs from disk for all proven blocks in the requested range.
-    // Blocks without a proof file are skipped (not yet proven). Use then() + filter_map() since
-    // load_proof is async but tokio_stream::StreamExt::filter_map is synchronous.
-    let historical = tokio_stream::iter(from.as_u32()..=proven_tip.as_u32())
-        .map(BlockNumber::from)
-        .then(move |block_num| {
-            let state = Arc::clone(&state);
-            async move {
-                match state.load_proof(block_num).await {
-                    Ok(Some(bytes)) => Some(Ok(BlockProof {
-                        block_num: block_num.as_u32(),
-                        proof: bytes,
-                    })),
-                    Ok(None) => None, // not yet proven, skip
-                    Err(e) => Some(Err(Status::internal(format!(
-                        "failed to load proof for block {}: {e}",
-                        block_num.as_u32()
-                    )))),
-                }
-            }
-        })
-        .filter_map(|opt| opt);
-
-    // Phase 2: forward live proof notifications, skipping those already covered by replay.
-    let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
-        Ok(notification) if notification.block_num() > proven_tip => Some(Ok(BlockProof {
-            block_num: notification.block_num().as_u32(),
-            proof: notification.proof_bytes().to_vec(),
-        })),
-        Ok(_) => None, // already replayed
-        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(Status::data_loss(format!(
-            "replica lagged by {n} proofs; reconnect from your local tip"
-        )))),
+) -> impl Stream<Item = Result<BlockProof, Status>> + Send + 'static {
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        if let Err(status) = run_proof_stream(from, cache, tip_rx, state, &tx).await {
+            // Error indicates client disconnected, which is not an error on our side.
+            let _ = tx.send(Err(status)).await;
+        }
     });
+    ReceiverStream::new(rx)
+}
 
-    historical.chain(live)
+// STREAM TASKS
+// ================================================================================================
+
+/// Drives the block subscription loop until the client disconnects or the server shuts down.
+///
+/// On each committed-tip advance, emits all blocks from `next` to the new tip. Returns `Ok(())`
+/// on a clean shutdown and `Err(status)` when a block cannot be loaded.
+async fn run_block_stream(
+    from: BlockNumber,
+    cache: BlockCache,
+    mut tip_rx: watch::Receiver<BlockNumber>,
+    state: Arc<State>,
+    tx: &mpsc::Sender<Result<SignedBlock, Status>>,
+) -> Result<(), Status> {
+    let mut next = from;
+    loop {
+        // Read tip.
+        let tip = *tip_rx.borrow_and_update();
+        while next <= tip {
+            let bytes = fetch_block(next, &cache, &state).await?;
+            if tx.send(Ok(SignedBlock { block: bytes })).await.is_err() {
+                // Client disconnected.
+                return Ok(());
+            }
+            next = next.child();
+        }
+        // Wait for tip change.
+        if tip_rx.changed().await.is_err() {
+            // Server shut down.
+            return Ok(());
+        }
+    }
+}
+
+/// Drives the proof subscription loop until the client disconnects or the server shuts down.
+///
+/// On each proven-tip advance, emits all proofs from `next` to the new tip. Returns `Ok(())`
+/// on a clean shutdown and `Err(status)` when a proof cannot be loaded.
+async fn run_proof_stream(
+    from: BlockNumber,
+    cache: ProofCache,
+    mut tip_rx: watch::Receiver<BlockNumber>,
+    state: Arc<State>,
+    tx: &mpsc::Sender<Result<BlockProof, Status>>,
+) -> Result<(), Status> {
+    let mut next = from;
+    loop {
+        // Read tip.
+        let tip = *tip_rx.borrow_and_update();
+        while next <= tip {
+            let proof = fetch_proof(next, &cache, &state).await?;
+            if tx.send(Ok(BlockProof { block_num: next.as_u32(), proof })).await.is_err() {
+                // Client disconnected.
+                return Ok(());
+            }
+            next = next.child();
+        }
+        // Wait for tip change.
+        if tip_rx.changed().await.is_err() {
+            // Server shut down.
+            return Ok(());
+        }
+    }
+}
+
+// FETCH HELPERS
+// ================================================================================================
+
+/// Returns the raw bytes for `block_num`, checking the cache before falling back to disk.
+async fn fetch_block(
+    block_num: BlockNumber,
+    cache: &BlockCache,
+    state: &State,
+) -> Result<Vec<u8>, Status> {
+    if let Some(entry) = cache.get(&block_num) {
+        return Ok(entry.block_bytes().to_vec());
+    }
+    state
+        .load_block(block_num)
+        .await
+        .map_err(|e| Status::internal(format!("failed to load block {}: {e}", block_num.as_u32())))?
+        .ok_or_else(|| Status::not_found(format!("block {} not found", block_num.as_u32())))
+}
+
+/// Returns the raw proof bytes for `block_num`, checking the cache before falling back to disk.
+async fn fetch_proof(
+    block_num: BlockNumber,
+    cache: &ProofCache,
+    state: &State,
+) -> Result<Vec<u8>, Status> {
+    if let Some(entry) = cache.get(&block_num) {
+        return Ok(entry.proof_bytes().to_vec());
+    }
+    state
+        .load_proof(block_num)
+        .await
+        .map_err(|e| {
+            Status::internal(format!("failed to load proof for block {}: {e}", block_num.as_u32()))
+        })?
+        .ok_or_else(|| {
+            Status::not_found(format!("proof for block {} not found", block_num.as_u32()))
+        })
 }

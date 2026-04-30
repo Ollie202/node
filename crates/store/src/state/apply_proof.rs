@@ -16,12 +16,8 @@ impl State {
     ) -> anyhow::Result<()> {
         self.block_store.save_proof(block_num, &proof_bytes).await?;
         let tip = self.db.mark_proven_and_advance_sequence(block_num).await?;
+        self.proof_cache.push(block_num, ProofNotification::new(block_num, proof_bytes));
         self.proven_tip.advance(tip);
-
-        // Proof notifications are broadcast here so downstream replicas receive them. Errors
-        // indicate no active subscribers, which is fine.
-        let _ = self.proof_sender.send(ProofNotification::new(block_num, proof_bytes));
-
         Ok(())
     }
 }

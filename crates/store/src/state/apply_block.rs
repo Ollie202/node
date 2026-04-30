@@ -93,8 +93,8 @@ impl State {
         // finalized blocks. So we should check for the latest block when getting block from
         // the store.
         let signed_block_bytes = signed_block.to_bytes();
-        // Clone before moving into the block-save task so we can broadcast to replicas at commit.
-        let broadcast_bytes = signed_block_bytes.clone();
+        // Clone before moving into the block-save task so we can cache for replicas at commit.
+        let cache_bytes = signed_block_bytes.clone();
         let store = Arc::clone(&self.block_store);
         let block_save_task = tokio::spawn(
             async move { store.save_block(block_num, &signed_block_bytes).await }.in_current_span(),
@@ -296,8 +296,9 @@ impl State {
 
         self.forest.write().await.apply_block_updates(block_num, account_deltas)?;
 
-        // Notify replica subscribers. Errors here mean no active subscribers, which is fine.
-        let _ = self.block_sender.send(BlockNotification::new(block_num, broadcast_bytes));
+        // Push to cache and notify replica subscribers.
+        self.block_cache.push(block_num, BlockNotification::new(block_num, cache_bytes));
+        let _ = self.committed_tip_tx.send(block_num);
 
         info!(%block_commitment, block_num = block_num.as_u32(), COMPONENT, "apply_block successful");
 

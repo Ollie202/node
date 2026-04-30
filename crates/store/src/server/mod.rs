@@ -11,7 +11,7 @@ use miden_node_utils::clap::{GrpcOptionsInternal, StorageOptions};
 use miden_node_utils::panic::{CatchPanicLayer, catch_panic_layer_fn};
 use miden_node_utils::tracing::grpc::grpc_trace_fn;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
 use tower_http::trace::TraceLayer;
@@ -24,7 +24,7 @@ use crate::errors::ApplyBlockError;
 use crate::genesis::GenesisBlock;
 use crate::proven_tip::ProvenTipWriter;
 use crate::server::replica_sync::{BlockReplicaSync, ProofReplicaSync};
-use crate::state::{BlockNotification, ProofNotification, State};
+use crate::state::{ProofCache, State};
 use crate::{BlockProver, COMPONENT};
 
 mod api;
@@ -124,7 +124,7 @@ impl Store {
 
         let (termination_ask, mut termination_signal) =
             tokio::sync::mpsc::channel::<ApplyBlockError>(1);
-        let (state, tx_proven_tip, block_sender, proof_sender) =
+        let (state, tx_proven_tip) =
             State::load(&self.data_directory, self.storage_options, termination_ask)
                 .await
                 .context("failed to load state")?;
@@ -143,21 +143,14 @@ impl Store {
                     block_prover_url,
                     max_concurrent_proofs,
                     tx_proven_tip,
-                    block_sender,
-                    proof_sender,
                     self.grpc_options,
                     self.rpc_listener,
                 )
                 .await?
             },
-            StoreMode::Replica { upstream_url } => Self::setup_replica_mode(
-                state,
-                upstream_url,
-                block_sender,
-                proof_sender,
-                self.grpc_options,
-                self.rpc_listener,
-            )?,
+            StoreMode::Replica { upstream_url } => {
+                Self::setup_replica_mode(state, upstream_url, self.grpc_options, self.rpc_listener)?
+            },
         };
 
         tokio::select! {
@@ -188,8 +181,6 @@ impl Store {
         block_prover_url: Option<Url>,
         max_concurrent_proofs: NonZeroUsize,
         tx_proven_tip: ProvenTipWriter,
-        block_sender: broadcast::Sender<crate::state::BlockNotification>,
-        proof_sender: broadcast::Sender<ProofNotification>,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
     ) -> anyhow::Result<ModeSetup> {
@@ -198,17 +189,18 @@ impl Store {
             ntx_builder_endpoint=?ntx_builder_listener.local_addr()?,
             "Starting in block-producer mode");
 
+        let proof_cache = state.proof_cache.clone();
         let (proof_scheduler_task, chain_tip_sender) = Self::spawn_proof_scheduler(
             &state,
             block_prover_url,
             max_concurrent_proofs,
             tx_proven_tip,
-            proof_sender.clone(),
+            proof_cache,
         )
         .await;
 
         let state = Arc::new(state);
-        let store_api = api::StoreApi::new(state, block_sender, proof_sender);
+        let store_api = api::StoreApi::new(state);
         let block_producer_api = block_producer::BlockProducerApi {
             inner: store_api.clone(),
             chain_tip_sender,
@@ -232,8 +224,6 @@ impl Store {
     fn setup_replica_mode(
         state: State,
         upstream_url: Url,
-        block_sender: broadcast::Sender<BlockNotification>,
-        proof_sender: broadcast::Sender<ProofNotification>,
         grpc_options: GrpcOptionsInternal,
         rpc_listener: TcpListener,
     ) -> anyhow::Result<ModeSetup> {
@@ -249,7 +239,7 @@ impl Store {
             }
         });
 
-        let store_api = api::StoreApi::new(state, block_sender, proof_sender);
+        let store_api = api::StoreApi::new(state);
         let join_set = Self::spawn_replica_grpc_servers(store_api, grpc_options, rpc_listener)?;
 
         Ok(ModeSetup {
@@ -267,7 +257,7 @@ impl Store {
         block_prover_url: Option<Url>,
         max_concurrent_proofs: NonZeroUsize,
         proven_tip: ProvenTipWriter,
-        proof_sender: broadcast::Sender<ProofNotification>,
+        proof_cache: ProofCache,
     ) -> (
         tokio::task::JoinHandle<anyhow::Result<()>>,
         watch::Sender<miden_protocol::block::BlockNumber>,
@@ -288,7 +278,7 @@ impl Store {
             chain_tip_rx,
             proven_tip,
             max_concurrent_proofs,
-            proof_sender,
+            proof_cache,
         );
 
         (handle, chain_tip_tx)

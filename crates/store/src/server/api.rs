@@ -10,13 +10,13 @@ use miden_protocol::account::AccountId;
 use miden_protocol::batch::OrderedBatches;
 use miden_protocol::block::{BlockInputs, BlockNumber};
 use miden_protocol::note::Nullifier;
-use tokio::sync::{Semaphore, broadcast};
+use tokio::sync::{Semaphore, watch};
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
 use crate::COMPONENT;
 use crate::errors::GetBlockInputsError;
-use crate::state::{BlockNotification, ProofNotification, State};
+use crate::state::{BlockCache, ProofCache, State};
 
 // STORE API
 // ================================================================================================
@@ -27,12 +27,14 @@ pub(super) const MAX_REPLICA_SUBSCRIPTIONS: usize = 10;
 #[derive(Clone)]
 pub struct StoreApi {
     pub(super) state: Arc<State>,
-    /// Broadcast sender for committed block notifications. Replicas call `.subscribe()` to
-    /// receive a stream of blocks without polling.
-    pub(super) block_sender: broadcast::Sender<BlockNotification>,
-    /// Broadcast sender for block proof notifications. Replicas call `.subscribe()` to
-    /// receive a stream of proofs without polling.
-    pub(super) proof_sender: broadcast::Sender<ProofNotification>,
+    /// FIFO cache of recent committed blocks for replica block subscriptions.
+    pub(super) block_cache: BlockCache,
+    /// Watch receiver that wakes whenever a new block is committed.
+    pub(super) committed_tip_rx: watch::Receiver<BlockNumber>,
+    /// FIFO cache of recent block proofs for replica proof subscriptions.
+    pub(super) proof_cache: ProofCache,
+    /// Watch receiver that wakes whenever the proven-in-sequence tip advances.
+    pub(super) proven_tip_rx: watch::Receiver<BlockNumber>,
     /// Limits concurrent block subscriptions to [`MAX_REPLICA_SUBSCRIPTIONS`].
     pub(super) block_subscription_semaphore: Arc<Semaphore>,
     /// Limits concurrent proof subscriptions to [`MAX_REPLICA_SUBSCRIPTIONS`].
@@ -40,15 +42,17 @@ pub struct StoreApi {
 }
 
 impl StoreApi {
-    pub(super) fn new(
-        state: Arc<State>,
-        block_sender: broadcast::Sender<BlockNotification>,
-        proof_sender: broadcast::Sender<ProofNotification>,
-    ) -> Self {
+    pub(super) fn new(state: Arc<State>) -> Self {
+        let committed_tip_rx = state.subscribe_committed_tip();
+        let proven_tip_rx = state.subscribe_proven_tip();
+        let block_cache = state.block_cache.clone();
+        let proof_cache = state.proof_cache.clone();
         Self {
             state,
-            block_sender,
-            proof_sender,
+            block_cache,
+            committed_tip_rx,
+            proof_cache,
+            proven_tip_rx,
             block_subscription_semaphore: Arc::new(Semaphore::new(MAX_REPLICA_SUBSCRIPTIONS)),
             proof_subscription_semaphore: Arc::new(Semaphore::new(MAX_REPLICA_SUBSCRIPTIONS)),
         }
