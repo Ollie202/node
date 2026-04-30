@@ -43,11 +43,11 @@ impl TelemetryLevel {
 
     pub(crate) fn tracing_tokens(self) -> proc_macro2::TokenStream {
         match self {
-            Self::Trace => quote! { ::miden_node_tracing::tracing::Level::TRACE },
-            Self::Debug => quote! { ::miden_node_tracing::tracing::Level::DEBUG },
-            Self::Info => quote! { ::miden_node_tracing::tracing::Level::INFO },
-            Self::Warn => quote! { ::miden_node_tracing::tracing::Level::WARN },
-            Self::Error => quote! { ::miden_node_tracing::tracing::Level::ERROR },
+            Self::Trace => quote! { ::miden_node_tracing::__private::tracing::Level::TRACE },
+            Self::Debug => quote! { ::miden_node_tracing::__private::tracing::Level::DEBUG },
+            Self::Info => quote! { ::miden_node_tracing::__private::tracing::Level::INFO },
+            Self::Warn => quote! { ::miden_node_tracing::__private::tracing::Level::WARN },
+            Self::Error => quote! { ::miden_node_tracing::__private::tracing::Level::ERROR },
         }
     }
 

@@ -14,7 +14,12 @@ pub struct Span(tracing::Span);
 
 impl Span {
     /// Creates a new wrapper around `span`.
-    pub fn new(span: tracing::Span) -> Self {
+    ///
+    /// This exists for the Miden tracing macros. Create spans with `trace_span!`, `debug_span!`,
+    /// `info_span!`, `warn_span!`, or `error_span!` so target/name validation and metadata
+    /// registration are applied consistently.
+    #[doc(hidden)]
+    pub fn __from_tracing_span(span: tracing::Span) -> Self {
         Self(span)
     }
 
@@ -24,13 +29,9 @@ impl Span {
     }
 
     /// Returns the wrapped tracing span.
-    pub fn as_tracing_span(&self) -> &tracing::Span {
+    #[cfg(test)]
+    pub(crate) fn as_tracing_span(&self) -> &tracing::Span {
         &self.0
-    }
-
-    /// Consumes this wrapper and returns the wrapped tracing span.
-    pub fn into_tracing_span(self) -> tracing::Span {
-        self.0
     }
 
     /// Enters this span for the current scope.
@@ -89,8 +90,12 @@ impl Span {
         object.record_attributes(&mut recorder);
     }
 
-    /// Records an OpenTelemetry event on this span.
-    pub fn record_event(
+    /// Records an event on this span.
+    ///
+    /// This exists for the Miden event macros. Emit events with `event!`, `trace!`, `debug!`,
+    /// `info!`, `warn!`, or `error!` so target validation and typed record handling are applied.
+    #[doc(hidden)]
+    pub fn __record_event(
         &self,
         name: impl Into<std::borrow::Cow<'static, str>>,
         recorder: OpenTelemetryEventRecorder,
@@ -99,7 +104,10 @@ impl Span {
     }
 
     /// Records `error` on this span by setting the span status to error.
-    pub fn record_error<E>(&self, error: &E)
+    ///
+    /// This exists for the Miden `instrument` macro, which records returned errors automatically.
+    #[doc(hidden)]
+    pub fn __record_error<E>(&self, error: &E)
     where
         E: Error + ?Sized,
     {
@@ -109,18 +117,6 @@ impl Span {
                 description: error::error_report(error).into(),
             },
         );
-    }
-}
-
-impl From<tracing::Span> for Span {
-    fn from(span: tracing::Span) -> Self {
-        Self::new(span)
-    }
-}
-
-impl AsRef<tracing::Span> for Span {
-    fn as_ref(&self) -> &tracing::Span {
-        self.as_tracing_span()
     }
 }
 
@@ -276,7 +272,7 @@ mod tests {
     #[test]
     fn span_records_error_status() {
         let error = TestError { source: SourceError };
-        let span = exported_span(|span| span.record_error(&error));
+        let span = exported_span(|span| span.__record_error(&error));
 
         assert_eq!(
             span.status,

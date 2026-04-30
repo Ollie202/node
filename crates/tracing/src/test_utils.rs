@@ -22,7 +22,7 @@ pub(crate) fn exported_span(record: impl FnOnce(&Span)) -> SpanData {
     let spans = exported_spans(|| {
         let span = tracing::info_span!("test_span");
         let _guard = span.enter();
-        let wrapped = Span::new(span.clone());
+        let wrapped = Span::__from_tracing_span(span.clone());
         record(&wrapped);
     });
 

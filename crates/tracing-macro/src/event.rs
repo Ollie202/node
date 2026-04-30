@@ -56,14 +56,17 @@ fn expand_event(input: TokenStream, fixed_level: Option<TelemetryLevel>) -> Toke
 
     quote! {
         {
-            if ::miden_node_tracing::tracing::event_enabled!(target: #target, #level) {
+            // Use tracing's filter gate so disabled targets/levels do not pay to construct typed
+            // event attributes, then record through our Span helper to keep the public macro
+            // contract independent of the internal event representation.
+            if ::miden_node_tracing::__private::tracing::event_enabled!(target: #target, #level) {
                 let mut __miden_node_tracing_event =
-                    ::miden_node_tracing::OpenTelemetryEventRecorder::new();
+                    ::miden_node_tracing::__private::OpenTelemetryEventRecorder::new();
                 __miden_node_tracing_event.record_attribute("level", #level_name);
                 __miden_node_tracing_event.record_attribute("target", #target);
                 #(#records)*
                 ::miden_node_tracing::Span::current()
-                    .record_event(#event_name, __miden_node_tracing_event);
+                    .__record_event(#event_name, __miden_node_tracing_event);
             }
         }
     }

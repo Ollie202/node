@@ -16,7 +16,7 @@ pub(crate) fn submit_span_metadata(
     };
 
     quote! {
-        ::miden_node_tracing::inventory::submit! {
+        ::miden_node_tracing::__private::inventory::submit! {
             ::miden_node_tracing::SpanMetadata {
                 target: #target,
                 level: #level,

@@ -4,7 +4,7 @@ use opentelemetry::{Key, KeyValue, Value};
 
 use crate::{OpenTelemetryField, OpenTelemetryObject, OpenTelemetryObjectRecorder};
 
-/// Records typed OpenTelemetry attributes for an event.
+/// Records typed attributes for a macro-created event.
 #[derive(Debug, Default)]
 pub struct OpenTelemetryEventRecorder {
     attributes: Vec<KeyValue>,

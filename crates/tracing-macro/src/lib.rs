@@ -12,7 +12,7 @@ mod target;
 ///
 /// This is a restricted wrapper around [`tracing::instrument`]. It always applies `skip_all`,
 /// requires a target from the Miden target allowlist, rejects `fields`, `skip`, `skip_all`, and
-/// `err`, and records returned errors through [`miden_node_tracing::Span::record_error`].
+/// `err`, and records returned errors on the current span.
 ///
 /// Supported arguments:
 ///
@@ -52,17 +52,15 @@ mod target;
 /// ```
 ///
 /// [`tracing::instrument`]: https://docs.rs/tracing/latest/tracing/attr.instrument.html
-/// [`miden_node_tracing::Span::record_error`]: https://docs.rs/miden-node-tracing/latest/miden_node_tracing/struct.Span.html#method.record_error
 #[proc_macro_attribute]
 pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
     instrument::instrument(attr, item)
 }
 
-/// Records an OpenTelemetry event on the current span with an explicit level.
+/// Records an event on the current Miden span with an explicit level.
 ///
-/// This macro records a span event directly through `miden_node_tracing::Span`; it does not emit a
-/// normal `tracing` event. It is still gated by `tracing::event_enabled!`, so disabled targets and
-/// levels avoid constructing the event attributes.
+/// The event respects the configured Miden target and level filters. Disabled targets and levels
+/// avoid constructing the event attributes.
 ///
 /// Syntax:
 ///
@@ -106,7 +104,7 @@ pub fn event(input: TokenStream) -> TokenStream {
     event::event(input)
 }
 
-/// Records a trace-level OpenTelemetry event on the current span.
+/// Records a trace-level event on the current Miden span.
 ///
 /// This is shorthand for [`event!`] with `level = trace`. `target` is required and must be first.
 /// Typed `field(...)` and `object(...)` records may be supplied before the message.
@@ -127,7 +125,7 @@ pub fn trace(input: TokenStream) -> TokenStream {
     event::trace(input)
 }
 
-/// Records a debug-level OpenTelemetry event on the current span.
+/// Records a debug-level event on the current Miden span.
 ///
 /// This is shorthand for [`event!`] with `level = debug`. `target` is required and must be first.
 /// Typed `field(...)` and `object(...)` records may be supplied before the message.
@@ -148,7 +146,7 @@ pub fn debug(input: TokenStream) -> TokenStream {
     event::debug(input)
 }
 
-/// Records an info-level OpenTelemetry event on the current span.
+/// Records an info-level event on the current Miden span.
 ///
 /// This is shorthand for [`event!`] with `level = info`. `target` is required and must be first.
 /// Typed `field(...)` and `object(...)` records may be supplied before the message.
@@ -170,7 +168,7 @@ pub fn info(input: TokenStream) -> TokenStream {
     event::info(input)
 }
 
-/// Records a warn-level OpenTelemetry event on the current span.
+/// Records a warn-level event on the current Miden span.
 ///
 /// This is shorthand for [`event!`] with `level = warn`. `target` is required and must be first.
 /// Typed `field(...)` and `object(...)` records may be supplied before the message.
@@ -191,13 +189,13 @@ pub fn warn(input: TokenStream) -> TokenStream {
     event::warn(input)
 }
 
-/// Records an error-level OpenTelemetry event on the current span.
+/// Records an error-level event on the current Miden span.
 ///
 /// This is shorthand for [`event!`] with `level = error`. `target` is required and must be first.
 /// Typed `field(...)` and `object(...)` records may be supplied before the message.
 ///
-/// This macro does not record an error status by itself. Use [`Span::record_error`] when the span
-/// should be marked as failed.
+/// This macro does not record an error status by itself. Prefer [`instrument`] for fallible
+/// operations so returned errors are recorded automatically.
 ///
 /// # Examples
 ///
@@ -210,7 +208,7 @@ pub fn warn(input: TokenStream) -> TokenStream {
 /// ```
 ///
 /// [`event!`]: macro@event
-/// [`Span::record_error`]: https://docs.rs/miden-node-tracing/latest/miden_node_tracing/struct.Span.html#method.record_error
+/// [`instrument`]: macro@instrument
 #[proc_macro]
 pub fn error(input: TokenStream) -> TokenStream {
     event::error(input)

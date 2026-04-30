@@ -37,8 +37,8 @@ fn expand_span(input: TokenStream, macro_name: &str, level: TelemetryLevel) -> T
     quote! {
         {
             #submit_metadata
-            ::miden_node_tracing::Span::new(
-                ::miden_node_tracing::tracing::#macro_name!(target: #target, #name)
+            ::miden_node_tracing::Span::__from_tracing_span(
+                ::miden_node_tracing::__private::tracing::#macro_name!(target: #target, #name)
             )
         }
     }

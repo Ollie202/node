@@ -95,7 +95,7 @@ impl InstrumentArgs {
                 ))?,
                 Some("err") => Err(syn::Error::new_spanned(
                     arg,
-                    "`err` is not supported; this macro records returned errors with `Span::record_error`",
+                    "`err` is not supported; this macro records returned errors automatically",
                 ))?,
                 Some(_) => Err(syn::Error::new_spanned(
                     arg,
@@ -162,7 +162,7 @@ fn expand_instrument(
             if let ::core::result::Result::Err(ref __miden_node_tracing_error) =
                 __miden_node_tracing_result
             {
-                ::miden_node_tracing::Span::current().record_error(__miden_node_tracing_error);
+                ::miden_node_tracing::Span::current().__record_error(__miden_node_tracing_error);
             }
             __miden_node_tracing_result
         }}
@@ -173,7 +173,7 @@ fn expand_instrument(
             if let ::core::result::Result::Err(ref __miden_node_tracing_error) =
                 __miden_node_tracing_result
             {
-                ::miden_node_tracing::Span::current().record_error(__miden_node_tracing_error);
+                ::miden_node_tracing::Span::current().__record_error(__miden_node_tracing_error);
             }
             __miden_node_tracing_result
         }}
@@ -181,7 +181,7 @@ fn expand_instrument(
 
     quote! {
         #(#attrs)*
-        #[::miden_node_tracing::tracing::instrument(#tracing_args)]
+        #[::miden_node_tracing::__private::tracing::instrument(#tracing_args)]
         #vis #sig #body
     }
 }
