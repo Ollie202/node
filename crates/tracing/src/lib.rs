@@ -6,9 +6,9 @@ extern crate self as miden_node_tracing;
 
 mod catalog;
 mod event;
+mod exporter;
 mod field;
 mod filter;
-mod install;
 #[expect(
     dead_code,
     reason = "control-plane filters are wired in once subscriber/exporter setup is added"
@@ -16,7 +16,6 @@ mod install;
 mod internal;
 mod object;
 mod span;
-mod stdout;
 mod user;
 
 #[cfg(test)]
@@ -35,9 +34,7 @@ pub use catalog::{
     registered_user_facing_metadata,
 };
 pub use event::Event;
-pub use field::OpenTelemetryField;
-pub use filter::FilterError;
-pub use install::{
+pub use exporter::{
     DEFAULT_OTEL_FILTER,
     DEFAULT_USER_LOG_FILTER,
     InstallError,
@@ -45,6 +42,8 @@ pub use install::{
     TracingHandle,
     install,
 };
+pub use field::OpenTelemetryField;
+pub use filter::FilterError;
 pub use miden_node_tracing_macro::{
     debug,
     debug_span,

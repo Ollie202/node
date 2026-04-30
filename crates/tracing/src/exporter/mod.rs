@@ -1,3 +1,6 @@
+mod otel;
+mod stdout;
+
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -5,7 +8,6 @@ use tracing_subscriber::prelude::*;
 
 use crate::filter::{DynamicFilter, FilterError};
 use crate::internal;
-use crate::stdout::UserFacingStdoutExporter;
 
 /// Default filter used for OpenTelemetry exports.
 pub const DEFAULT_OTEL_FILTER: &str = crate::filter::DEFAULT_FILTER;
@@ -82,13 +84,13 @@ impl std::fmt::Debug for TracingHandle {
 /// Guard which shuts down installed OpenTelemetry tracer providers on drop.
 #[derive(Debug)]
 pub(crate) struct TracingGuard {
-    trace_provider: SdkTracerProvider,
+    otel_provider: SdkTracerProvider,
     user_log_provider: SdkTracerProvider,
 }
 
 impl Drop for TracingGuard {
     fn drop(&mut self) {
-        if let Err(error) = self.trace_provider.shutdown() {
+        if let Err(error) = self.otel_provider.shutdown() {
             eprintln!("failed to shut down OTLP trace provider: {error:?}");
         }
         if let Err(error) = self.user_log_provider.shutdown() {
@@ -110,11 +112,11 @@ pub fn install(config: TracingConfig) -> Result<TracingHandle, InstallError> {
 
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    let trace_provider = otlp_grpc_trace_provider()?;
-    let user_log_provider = user_log_trace_provider();
+    let otel_provider = otel::grpc_trace_provider()?;
+    let user_log_provider = stdout::trace_provider();
 
     let trace_layer = tracing_opentelemetry::layer()
-        .with_tracer(trace_provider.tracer("miden-node-tracing-otlp"))
+        .with_tracer(otel_provider.tracer("miden-node-tracing-otlp"))
         .with_filter(internal::with_control_plane_events(otel_filter_layer));
     let user_log_layer = tracing_opentelemetry::layer()
         .with_tracer(user_log_provider.tracer("miden-node-tracing-user-stdout"))
@@ -133,23 +135,8 @@ pub fn install(config: TracingConfig) -> Result<TracingHandle, InstallError> {
     Ok(TracingHandle {
         otel_filter,
         user_log_filter,
-        _guard: TracingGuard { trace_provider, user_log_provider },
+        _guard: TracingGuard { otel_provider, user_log_provider },
     })
-}
-
-fn otlp_grpc_trace_provider() -> Result<SdkTracerProvider, InstallError> {
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .build()
-        .map_err(InstallError::OtlpExporter)?;
-
-    Ok(SdkTracerProvider::builder().with_batch_exporter(exporter).build())
-}
-
-fn user_log_trace_provider() -> SdkTracerProvider {
-    SdkTracerProvider::builder()
-        .with_simple_exporter(UserFacingStdoutExporter::stdout())
-        .build()
 }
 
 /// Error returned while installing tracing.
@@ -216,7 +203,7 @@ mod tests {
             otel_filter,
             user_log_filter,
             _guard: super::TracingGuard {
-                trace_provider: opentelemetry_sdk::trace::SdkTracerProvider::builder().build(),
+                otel_provider: opentelemetry_sdk::trace::SdkTracerProvider::builder().build(),
                 user_log_provider: opentelemetry_sdk::trace::SdkTracerProvider::builder().build(),
             },
         };

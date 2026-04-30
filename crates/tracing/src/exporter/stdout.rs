@@ -6,7 +6,13 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::trace::{Event, Status};
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
-use opentelemetry_sdk::trace::{SpanData, SpanExporter};
+use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
+
+pub(super) fn trace_provider() -> SdkTracerProvider {
+    SdkTracerProvider::builder()
+        .with_simple_exporter(UserFacingStdoutExporter::stdout())
+        .build()
+}
 
 /// Exports user-facing spans and events as compact stdout log lines.
 ///
