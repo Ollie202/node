@@ -18,9 +18,6 @@ use tracing_subscriber::layer::{Context, Filter};
 /// Target used for tracing events that carry control-plane signals.
 pub(crate) const CONTROL_PLANE_TARGET: &str = "miden_tracing::control_plane";
 
-/// Event name used for tracing events that carry control-plane signals.
-pub(crate) const CONTROL_PLANE_EVENT_NAME: &str = "miden_tracing::control_plane";
-
 const SPANLESS_PANIC_SPAN_NAME: &str = "spanless_panic";
 
 thread_local! {
@@ -91,7 +88,7 @@ where
 
 /// Per-layer filter which hides raw control-plane events from normal output/export layers.
 ///
-/// This only rejects the reserved control-plane event name. Other records on the control-plane
+/// This rejects events on the reserved control-plane target. Other records on the control-plane
 /// target, such as the `spanless_panic` fallback span, remain visible to the wrapped layer.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct IgnoreControlPlaneEvents;
@@ -108,8 +105,8 @@ impl<S> Filter<S> for IgnoreControlPlaneEvents {
 
     /// Enables callsite caching for the static control-plane event decision.
     ///
-    /// The reserved event name and target are compile-time metadata, so the decision does not need
-    /// per-event context.
+    /// The reserved target and metadata kind are compile-time metadata, so the decision does not
+    /// need per-event context.
     fn callsite_enabled(
         &self,
         metadata: &'static tracing::Metadata<'static>,
@@ -238,9 +235,9 @@ pub(crate) fn with_control_plane_events<F>(filter: F) -> WithControlPlaneEvents<
     WithControlPlaneEvents::new(filter)
 }
 
-/// Returns `true` if `metadata` describes the reserved control-plane event.
+/// Returns `true` if `metadata` describes a control-plane event.
 pub(crate) fn is_control_plane_event(metadata: &tracing::Metadata<'_>) -> bool {
-    is_control_plane_target(metadata.target()) && metadata.name() == CONTROL_PLANE_EVENT_NAME
+    metadata.is_event() && is_control_plane_target(metadata.target())
 }
 
 /// Returns `true` when `target` is reserved for this crate's control-plane telemetry.
@@ -287,7 +284,6 @@ fn emit_panic_event(info: &PanicHookInfo<'_>) {
     let column = location.map_or(0, std::panic::Location::column);
 
     tracing::event!(
-        name: CONTROL_PLANE_EVENT_NAME,
         target: CONTROL_PLANE_TARGET,
         tracing::Level::ERROR,
         control_plane.kind = kind::PANIC,
@@ -511,7 +507,6 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        CONTROL_PLANE_EVENT_NAME,
         CONTROL_PLANE_TARGET,
         ControlPlaneEventFields,
         ControlPlaneEventLayer,
@@ -529,7 +524,6 @@ mod tests {
             let _selected_span = SelectedSpanGuard::new(span.clone());
 
             tracing::event!(
-                name: CONTROL_PLANE_EVENT_NAME,
                 target: CONTROL_PLANE_TARGET,
                 tracing::Level::ERROR,
                 control_plane.kind = "panic",
@@ -553,13 +547,12 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_event_filter_rejects_only_reserved_event_name() {
+    fn control_plane_event_filter_rejects_reserved_target_events() {
         let spans = exported_spans_with_control_plane_layer(|| {
             let span = tracing::error_span!(target: CONTROL_PLANE_TARGET, "spanless_panic");
             let _guard = span.enter();
             let _selected_span = SelectedSpanGuard::new(span.clone());
             tracing::event!(
-                name: CONTROL_PLANE_EVENT_NAME,
                 target: CONTROL_PLANE_TARGET,
                 tracing::Level::ERROR,
                 control_plane.kind = "panic",

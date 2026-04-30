@@ -587,7 +587,6 @@ mod tests {
 
         with_default(subscriber, || {
             tracing::event!(
-                name: crate::internal::CONTROL_PLANE_EVENT_NAME,
                 target: crate::internal::CONTROL_PLANE_TARGET,
                 tracing::Level::ERROR,
                 control_plane.kind = "panic",
