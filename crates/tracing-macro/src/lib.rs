@@ -17,12 +17,9 @@ mod user;
 ///
 /// Supported arguments:
 ///
-/// - `target = ...`, required. The value must be an allowed path such as `rpc` or
-///   `store::database`.
-/// - `name = ...`, optional. The value must be a static string literal such as
-///   `"store::get_block_header"`. Defaults to the function name.
-/// - `level = ...`, optional. The value must be one of `trace`, `debug`, `info`, `warn`, or
-///   `error`. Defaults to `info`.
+/// - target, required. The value must be an allowed path such as `rpc` or `store::database`.
+/// - name, required. The value must be a static string literal such as `"store::get_block_header"`.
+/// - level, required. The value must be one of `trace`, `debug`, `info`, `warn`, or `error`.
 /// - `user`, optional. Marks the span for user-facing logs and registers it in the user-facing
 ///   metadata catalog.
 ///
@@ -36,7 +33,7 @@ mod user;
 /// use miden_node_tracing::{Span, instrument};
 ///
 /// /// Loads a block header from the store database.
-/// #[instrument(target = store::database, name = "store::get_block_header", level = debug)]
+/// #[instrument(store::database, "store::get_block_header", debug)]
 /// async fn get_block_header(
 ///     block_num: miden_protocol::block::BlockNumber,
 /// ) -> Result<(), anyhow::Error> {
@@ -48,7 +45,7 @@ mod user;
 /// ```
 ///
 /// ```ignore
-/// #[miden_node_tracing::instrument(target = rpc)]
+/// #[miden_node_tracing::instrument(rpc, "rpc::get_block", info)]
 /// fn get_block() -> Result<(), anyhow::Error> {
 ///     Ok(())
 /// }
@@ -68,44 +65,45 @@ pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Syntax:
 ///
 /// ```text
-/// event!(target = <allowed target>, level = <level>, [user,] [records...], <message literal>, [format args...])
+/// event!(<allowed target>, <message literal>, <level>, [user,] justification = "<why event>")
 /// ```
 ///
-/// `target` must be first and `level` must follow it. Records, when present, must appear before the
-/// required message. `field(value)` records an [`OpenTelemetryField`] with its default key, and
-/// `object(value)` records an [`OpenTelemetryObject`] with its default prefix. Use
-/// `field(custom.key = value)` or `object(custom.prefix = value)` to override that key or prefix.
-/// Add `user` before any records to mark the event for user-facing logs and register its static
-/// message template in the user-facing metadata catalog.
+/// Add `user` after the required level to mark the event for user-facing logs and register its
+/// static message template in the user-facing metadata catalog. `justification` is required but is
+/// only inspected at compile time; it should explain why this is an event instead of a span. The
+/// macro returns an [`Event`] handle; record typed fields or objects on that handle and call
+/// `emit()`, or let it emit when dropped.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use miden_node_tracing::event;
 ///
-/// event!(
-///     target = sequencer::block_builder,
-///     level = info,
+/// let event = event!(
+///     sequencer::block_builder,
+///     "built block",
+///     info,
 ///     user,
-///     field(block_num),
-///     object(block = header),
-///     "built block {}",
-///     block_num.as_u32(),
+///     justification = "records a user-visible milestone after the build span closes",
 /// );
+/// event.record_field(&block_num);
+/// event.record_object_as(&header, "block");
+/// event.emit();
 /// ```
 ///
 /// ```ignore
-/// miden_node_tracing::event!(
-///     target = rpc,
-///     level = warn,
-///     user,
-///     field(request.block_number = block_num),
+/// let event = miden_node_tracing::event!(
+///     rpc,
 ///     "request used an old block number",
+///     warn,
+///     user,
+///     justification = "the request is rejected before there is useful span work to time",
 /// );
+/// event.record_field_as(&block_num, "request.block_number");
+/// event.emit();
 /// ```
 ///
-/// [`OpenTelemetryField`]: https://docs.rs/miden-node-tracing/latest/miden_node_tracing/trait.OpenTelemetryField.html
-/// [`OpenTelemetryObject`]: https://docs.rs/miden-node-tracing/latest/miden_node_tracing/trait.OpenTelemetryObject.html
+/// [`Event`]: https://docs.rs/miden-node-tracing/latest/miden_node_tracing/struct.Event.html
 #[proc_macro]
 pub fn event(input: TokenStream) -> TokenStream {
     event::event(input)
@@ -113,20 +111,21 @@ pub fn event(input: TokenStream) -> TokenStream {
 
 /// Records a trace-level event on the current Miden span.
 ///
-/// This is shorthand for [`event!`] with `level = trace`. `target` is required and must be first.
-/// Typed `field(...)` and `object(...)` records may be supplied before the required message.
-/// Add `user` before any records to mark the event for user-facing logs and register its static
-/// message template in the user-facing metadata catalog.
+/// This uses the fixed `trace` level and does not accept a level argument. Add `user` after the
+/// required message to mark the event for user-facing logs and register its static message template
+/// in the user-facing metadata catalog. `justification` is required and compile-time only.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// miden_node_tracing::trace!(
-///     target = sequencer::mempool,
-///     user,
-///     field(transaction_id),
+/// let event = miden_node_tracing::trace!(
+///     sequencer::mempool,
 ///     "selected transaction from mempool",
+///     user,
+///     justification = "records a sampled selection without adding another nested span",
 /// );
+/// event.record_field(&transaction_id);
+/// event.emit();
 /// ```
 ///
 /// [`event!`]: macro@event
@@ -137,19 +136,20 @@ pub fn trace(input: TokenStream) -> TokenStream {
 
 /// Records a debug-level event on the current Miden span.
 ///
-/// This is shorthand for [`event!`] with `level = debug`. `target` is required and must be first.
-/// Typed `field(...)` and `object(...)` records may be supplied before the required message.
-/// Add `user` before any records to mark the event for user-facing logs and register its static
-/// message template in the user-facing metadata catalog.
+/// This uses the fixed `debug` level and does not accept a level argument. Add `user` after the
+/// required message to mark the event for user-facing logs and register its static message template
+/// in the user-facing metadata catalog. `justification` is required and compile-time only.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// miden_node_tracing::debug!(
-///     target = store::database,
-///     field(block.number = block_num),
+/// let event = miden_node_tracing::debug!(
+///     store::database,
 ///     "loaded block from database",
+///     justification = "records a cache miss branch without adding duration data",
 /// );
+/// event.record_field_as(&block_num, "block.number");
+/// event.emit();
 /// ```
 ///
 /// [`event!`]: macro@event
@@ -160,21 +160,22 @@ pub fn debug(input: TokenStream) -> TokenStream {
 
 /// Records an info-level event on the current Miden span.
 ///
-/// This is shorthand for [`event!`] with `level = info`. `target` is required and must be first.
-/// Typed `field(...)` and `object(...)` records may be supplied before the required message.
-/// Add `user` before any records to mark the event for user-facing logs and register its static
-/// message template in the user-facing metadata catalog.
+/// This uses the fixed `info` level and does not accept a level argument. Add `user` after the
+/// required message to mark the event for user-facing logs and register its static message template
+/// in the user-facing metadata catalog. `justification` is required and compile-time only.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// miden_node_tracing::info!(
-///     target = sequencer::block_builder,
-///     user,
-///     field(block_num),
-///     object(header),
+/// let event = miden_node_tracing::info!(
+///     sequencer::block_builder,
 ///     "accepted block",
+///     user,
+///     justification = "records the user-facing acceptance point after validation spans complete",
 /// );
+/// event.record_field(&block_num);
+/// event.record_object(&header);
+/// event.emit();
 /// ```
 ///
 /// [`event!`]: macro@event
@@ -185,19 +186,20 @@ pub fn info(input: TokenStream) -> TokenStream {
 
 /// Records a warn-level event on the current Miden span.
 ///
-/// This is shorthand for [`event!`] with `level = warn`. `target` is required and must be first.
-/// Typed `field(...)` and `object(...)` records may be supplied before the required message.
-/// Add `user` before any records to mark the event for user-facing logs and register its static
-/// message template in the user-facing metadata catalog.
+/// This uses the fixed `warn` level and does not accept a level argument. Add `user` after the
+/// required message to mark the event for user-facing logs and register its static message template
+/// in the user-facing metadata catalog. `justification` is required and compile-time only.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// miden_node_tracing::warn!(
-///     target = rpc,
-///     field(account.id = account_id),
+/// let event = miden_node_tracing::warn!(
+///     rpc,
 ///     "request referenced an account that is not cached",
+///     justification = "records an input-dependent rejection before starting downstream work",
 /// );
+/// event.record_field_as(&account_id, "account.id");
+/// event.emit();
 /// ```
 ///
 /// [`event!`]: macro@event
@@ -208,10 +210,9 @@ pub fn warn(input: TokenStream) -> TokenStream {
 
 /// Records an error-level event on the current Miden span.
 ///
-/// This is shorthand for [`event!`] with `level = error`. `target` is required and must be first.
-/// Typed `field(...)` and `object(...)` records may be supplied before the required message.
-/// Add `user` before any records to mark the event for user-facing logs and register its static
-/// message template in the user-facing metadata catalog.
+/// This uses the fixed `error` level and does not accept a level argument. Add `user` after the
+/// required message to mark the event for user-facing logs and register its static message template
+/// in the user-facing metadata catalog. `justification` is required and compile-time only.
 ///
 /// This macro does not record an error status by itself. Prefer [`instrument`] for fallible
 /// operations so returned errors are recorded automatically.
@@ -219,11 +220,13 @@ pub fn warn(input: TokenStream) -> TokenStream {
 /// # Examples
 ///
 /// ```ignore
-/// miden_node_tracing::error!(
-///     target = ntxb::database,
-///     field(batch_id),
+/// let event = miden_node_tracing::error!(
+///     ntxb::database,
 ///     "failed to persist batch metadata",
+///     justification = "records a terminal failure after the fallible span records status",
 /// );
+/// event.record_field(&batch_id);
+/// event.emit();
 /// ```
 ///
 /// [`event!`]: macro@event
@@ -236,15 +239,16 @@ pub fn error(input: TokenStream) -> TokenStream {
 /// Creates a trace-level Miden span.
 ///
 /// The macro requires an allowed `target` as the first argument and a span-name string literal as
-/// the second argument. Fields are not accepted in the macro invocation; record fields or objects
-/// on the returned `miden_node_tracing::Span` instead. Add `user` after the name to mark the span
-/// for user-facing logs and register it in the user-facing metadata catalog.
+/// the second argument. The level is built into this macro and is not accepted as an argument.
+/// Fields are not accepted in the macro invocation; record fields or objects on the returned
+/// `miden_node_tracing::Span` instead. Add `user` after the name to mark the span for user-facing
+/// logs and register it in the user-facing metadata catalog.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let span = miden_node_tracing::trace_span!(
-///     target = sequencer::mempool,
+///     sequencer::mempool,
 ///     "mempool::select_transaction",
 /// );
 /// span.record_field(&transaction_id);
@@ -258,16 +262,17 @@ pub fn trace_span(input: TokenStream) -> TokenStream {
 /// Creates a debug-level Miden span.
 ///
 /// The macro requires an allowed `target` as the first argument and a span-name string literal as
-/// the second argument. Fields are not accepted in the macro invocation; record fields or objects
-/// on the returned `miden_node_tracing::Span` instead. Add `user` after the name to mark the span
-/// for user-facing logs and register it in the user-facing metadata catalog.
+/// the second argument. The level is built into this macro and is not accepted as an argument.
+/// Fields are not accepted in the macro invocation; record fields or objects on the returned
+/// `miden_node_tracing::Span` instead. Add `user` after the name to mark the span for user-facing
+/// logs and register it in the user-facing metadata catalog.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let span = miden_node_tracing::debug_span!(
-///     target = store::database,
-///     name = "store::read_block",
+///     store::database,
+///     "store::read_block",
 /// );
 /// span.record_field(&block_num);
 /// let _guard = span.entered();
@@ -280,15 +285,16 @@ pub fn debug_span(input: TokenStream) -> TokenStream {
 /// Creates an info-level Miden span.
 ///
 /// The macro requires an allowed `target` as the first argument and a span-name string literal as
-/// the second argument. Fields are not accepted in the macro invocation; record fields or objects
-/// on the returned `miden_node_tracing::Span` instead. Add `user` after the name to mark the span
-/// for user-facing logs and register it in the user-facing metadata catalog.
+/// the second argument. The level is built into this macro and is not accepted as an argument.
+/// Fields are not accepted in the macro invocation; record fields or objects on the returned
+/// `miden_node_tracing::Span` instead. Add `user` after the name to mark the span for user-facing
+/// logs and register it in the user-facing metadata catalog.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let span = miden_node_tracing::info_span!(
-///     target = sequencer::block_builder,
+///     sequencer::block_builder,
 ///     "block_builder::build_block",
 ///     user,
 /// );
@@ -303,15 +309,16 @@ pub fn info_span(input: TokenStream) -> TokenStream {
 /// Creates a warn-level Miden span.
 ///
 /// The macro requires an allowed `target` as the first argument and a span-name string literal as
-/// the second argument. Fields are not accepted in the macro invocation; record fields or objects
-/// on the returned `miden_node_tracing::Span` instead. Add `user` after the name to mark the span
-/// for user-facing logs and register it in the user-facing metadata catalog.
+/// the second argument. The level is built into this macro and is not accepted as an argument.
+/// Fields are not accepted in the macro invocation; record fields or objects on the returned
+/// `miden_node_tracing::Span` instead. Add `user` after the name to mark the span for user-facing
+/// logs and register it in the user-facing metadata catalog.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let span = miden_node_tracing::warn_span!(
-///     target = rpc,
+///     rpc,
 ///     "rpc::slow_request",
 /// );
 /// span.record_field(&block_num);
@@ -325,15 +332,16 @@ pub fn warn_span(input: TokenStream) -> TokenStream {
 /// Creates an error-level Miden span.
 ///
 /// The macro requires an allowed `target` as the first argument and a span-name string literal as
-/// the second argument. Fields are not accepted in the macro invocation; record fields or objects
-/// on the returned `miden_node_tracing::Span` instead. Add `user` after the name to mark the span
-/// for user-facing logs and register it in the user-facing metadata catalog.
+/// the second argument. The level is built into this macro and is not accepted as an argument.
+/// Fields are not accepted in the macro invocation; record fields or objects on the returned
+/// `miden_node_tracing::Span` instead. Add `user` after the name to mark the span for user-facing
+/// logs and register it in the user-facing metadata catalog.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let span = miden_node_tracing::error_span!(
-///     target = ntxb::database,
+///     ntxb::database,
 ///     "ntxb::database::write_batch",
 /// );
 /// span.record_field(&batch_id);

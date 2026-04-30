@@ -58,65 +58,79 @@ struct SpanArgs {
 
 impl Parse for SpanArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let target_ident = input.parse::<Ident>()?;
-        if target_ident != "target" {
-            return Err(syn::Error::new_spanned(
-                target_ident,
+        if input.is_empty() {
+            return Err(syn::Error::new(
+                input.span(),
                 "`target` is required and must be the first argument",
             ));
-        }
-
-        if input.peek(Token![=]) {
-            input.parse::<Token![=]>()?;
-        } else if input.peek(Token![:]) {
-            input.parse::<Token![:]>()?;
-        } else {
-            return Err(syn::Error::new(input.span(), "`target` must be followed by `=` or `:`"));
         }
 
         let target_expr = input.parse::<Expr>()?;
         let target_span = target_expr.span();
         let target = target::parse(&target_expr)?;
 
-        input.parse::<Token![,]>()?;
+        parse_comma(input, "`name` is required and must be a string literal")?;
         let name = parse_name(input)?;
-        let user = if input.is_empty() {
-            false
-        } else {
-            input.parse::<Token![,]>()?;
-            user::try_parse_marker(input)?
-        };
-
-        if !input.is_empty() {
-            let rest = input.parse::<proc_macro2::TokenStream>()?;
-            return Err(syn::Error::new_spanned(
-                rest,
-                "`fields` is not supported; record fields with `miden_node_tracing::Span`",
-            ));
-        }
+        let user = parse_optional_user(input)?;
 
         Ok(Self { target, target_span, name, user })
     }
 }
 
 fn parse_name(input: ParseStream<'_>) -> syn::Result<LitStr> {
-    let fork = input.fork();
-    let expr = if fork.peek(Ident) {
-        let name_ident = fork.parse::<Ident>()?;
-        if name_ident == "name" && fork.peek(Token![=]) {
-            input.parse::<Ident>()?;
-            input.parse::<Token![=]>()?;
-            input.parse::<Expr>()?
-        } else {
-            input.parse::<Expr>()?
-        }
-    } else {
-        input.parse::<Expr>()?
-    };
+    let expr = input.parse::<Expr>()?;
     let span = expr.span();
     let span_name = name::parse(&expr)?;
 
     Ok(LitStr::new(&span_name, span))
+}
+
+fn parse_comma(input: ParseStream<'_>, missing_message: &str) -> syn::Result<()> {
+    if input.is_empty() {
+        return Err(syn::Error::new(input.span(), missing_message));
+    }
+
+    input.parse::<Token![,]>()?;
+    if input.is_empty() {
+        return Err(syn::Error::new(input.span(), missing_message));
+    }
+
+    Ok(())
+}
+
+fn parse_optional_user(input: ParseStream<'_>) -> syn::Result<bool> {
+    if input.is_empty() {
+        return Ok(false);
+    }
+
+    input.parse::<Token![,]>()?;
+    if input.is_empty() {
+        return Ok(false);
+    }
+
+    let user = user::try_parse_marker(input)?;
+    if !user {
+        let rest = input.parse::<proc_macro2::TokenStream>()?;
+        return Err(syn::Error::new_spanned(
+            rest,
+            "built-in level span macros only support optional `user` after the span name",
+        ));
+    }
+
+    if input.is_empty() {
+        return Ok(true);
+    }
+
+    input.parse::<Token![,]>()?;
+    if input.is_empty() {
+        return Ok(true);
+    }
+
+    let rest = input.parse::<proc_macro2::TokenStream>()?;
+    Err(syn::Error::new_spanned(
+        rest,
+        "`user` may only be specified once and must be the final argument",
+    ))
 }
 
 #[cfg(test)]
@@ -127,64 +141,67 @@ mod tests {
     use super::SpanArgs;
 
     #[test]
-    fn parses_span_args_with_equals_target() {
-        let args = parse2::<SpanArgs>(quote!(target = store::database, "db::read")).unwrap();
+    fn parses_span_args() {
+        let args = parse2::<SpanArgs>(quote!(store::database, "db::read")).unwrap();
 
         assert_eq!(args.target, "store::database");
         assert_eq!(args.name.value(), "db::read");
     }
 
     #[test]
-    fn parses_span_args_with_colon_target() {
-        let args =
-            parse2::<SpanArgs>(quote!(target: sequencer::mempool, "mempool::select")).unwrap();
-
-        assert_eq!(args.target, "sequencer::mempool");
-        assert_eq!(args.name.value(), "mempool::select");
-    }
-
-    #[test]
-    fn parses_span_args_with_named_name() {
-        let args = parse2::<SpanArgs>(quote!(target = rpc, name = "rpc::get_block")).unwrap();
-
-        assert_eq!(args.target, "rpc");
-        assert_eq!(args.name.value(), "rpc::get_block");
-    }
-
-    #[test]
     fn parses_user_marker() {
-        let args =
-            parse2::<SpanArgs>(quote!(target = rpc, "rpc::submit_transaction", user)).unwrap();
+        let args = parse2::<SpanArgs>(quote!(rpc, "rpc::submit_transaction", user)).unwrap();
 
         assert!(args.user);
     }
 
     #[test]
+    fn rejects_named_syntax() {
+        let err = parse_err(quote!(target = rpc, "rpc::get_block"));
+
+        assert!(err.to_string().contains("`target` must be an allowed target path"));
+    }
+
+    #[test]
+    fn rejects_named_name() {
+        let err = parse_err(quote!(rpc, name = "rpc::get_block"));
+
+        assert!(err.to_string().contains("`name` must be a string literal"));
+    }
+
+    #[test]
     fn rejects_user_value() {
-        let err = parse_err(quote!(target = rpc, "rpc::submit_transaction", user = true));
+        let err = parse_err(quote!(rpc, "rpc::submit_transaction", user = true));
 
         assert!(err.to_string().contains("`user` is a bare marker"));
     }
 
     #[test]
-    fn rejects_fields() {
-        let err = parse_err(quote!(target = store::database, "db::read", block.number = 1));
+    fn rejects_level_argument() {
+        let err = parse_err(quote!(store::database, "db::read", info));
 
-        assert!(err.to_string().contains("`fields` is not supported"));
+        assert!(err.to_string().contains("only support optional `user`"));
     }
 
     #[test]
     fn rejects_path_name() {
-        let err = parse_err(quote!(target = rpc, rpc::get_block));
+        let err = parse_err(quote!(rpc, rpc::get_block));
 
         assert!(err.to_string().contains("`name` must be a string literal"));
     }
 
     #[test]
     fn rejects_missing_target() {
-        let err = parse_err(quote!(db::read));
+        let err = parse_err(quote!());
 
         assert!(err.to_string().contains("`target` is required"));
+    }
+
+    #[test]
+    fn rejects_missing_name() {
+        let err = parse_err(quote!(rpc));
+
+        assert!(err.to_string().contains("`name` is required"));
     }
 
     fn parse_err(tokens: proc_macro2::TokenStream) -> syn::Error {

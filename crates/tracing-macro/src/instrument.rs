@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::punctuated::Punctuated;
+use syn::parse::{ParseStream, Parser};
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, ExprLit, ItemFn, Lit, LitStr, Meta, Token, parse_macro_input};
 
@@ -8,10 +8,10 @@ use crate::level::TelemetryLevel;
 use crate::{metadata, name, target, user};
 
 pub(crate) fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
     let function = parse_macro_input!(item as ItemFn);
 
-    let instrument_args = match InstrumentArgs::parse(args) {
+    let parser = |input: ParseStream<'_>| InstrumentArgs::parse(input);
+    let instrument_args = match parser.parse(attr) {
         Ok(args) => args,
         Err(err) => return err.to_compile_error().into(),
     };
@@ -23,127 +23,98 @@ pub(crate) fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct InstrumentArgs {
     tracing_args: proc_macro2::TokenStream,
     target: String,
-    name: Option<String>,
+    name: String,
     level: TelemetryLevel,
     user: bool,
 }
 
 impl InstrumentArgs {
-    fn parse(args: Punctuated<Meta, Token![,]>) -> syn::Result<Self> {
-        let mut target = None;
-        let mut name = None;
-        let mut level = TelemetryLevel::Info;
-        let mut level_seen = false;
-        let mut user_seen = false;
-        let mut tracing_args = Vec::new();
-
-        for arg in args {
-            let ident = arg.path().get_ident().map(ToString::to_string);
-
-            match ident.as_deref() {
-                Some("name") => {
-                    let meta = name_value_arg(arg, "`name`")?;
-                    if name.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            meta,
-                            "`name` may only be specified once",
-                        ));
-                    }
-                    let value = name::parse(&meta.value)?;
-                    let value_literal = LitStr::new(&value, meta.value.span());
-
-                    name = Some(value);
-                    tracing_args.push(quote! { name = #value_literal });
-                },
-                Some("level") => {
-                    let meta = name_value_arg(arg, "`level`")?;
-                    if level_seen {
-                        return Err(syn::Error::new_spanned(
-                            meta,
-                            "`level` may only be specified once",
-                        ));
-                    }
-                    level_seen = true;
-                    level = TelemetryLevel::parse(&meta.value)?;
-                    let value = LitStr::new(level.as_str(), meta.value.span());
-
-                    tracing_args.push(quote! { level = #value });
-                },
-                Some("target") => {
-                    let meta = name_value_arg(arg, "`target`")?;
-                    if target.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            meta,
-                            "`target` may only be specified once",
-                        ));
-                    }
-
-                    let value = target::parse(&meta.value)?;
-                    let value_literal = LitStr::new(&value, meta.value.span());
-
-                    target = Some(value);
-                    tracing_args.push(quote! { target = #value_literal });
-                },
-                Some("user") => {
-                    if user_seen {
-                        return Err(syn::Error::new_spanned(
-                            arg,
-                            "`user` may only be specified once",
-                        ));
-                    }
-                    user::parse_meta_marker(arg)?;
-                    user_seen = true;
-                },
-                Some("skip_all") => {
-                    Err(syn::Error::new_spanned(arg, "`skip_all` is always applied by this macro"))?
-                },
-                Some("skip") => Err(syn::Error::new_spanned(
-                    arg,
-                    "`skip` is not supported; this macro always skips all arguments",
-                ))?,
-                Some("fields") => Err(syn::Error::new_spanned(
-                    arg,
-                    "`fields` is not supported; record fields with `miden_node_tracing::Span`",
-                ))?,
-                Some("err") => Err(syn::Error::new_spanned(
-                    arg,
-                    "`err` is not supported; this macro records returned errors automatically",
-                ))?,
-                Some(_) => Err(syn::Error::new_spanned(
-                    arg,
-                    "unsupported instrument argument; only `name`, `target`, `level`, and `user` are supported",
-                ))?,
-                None => Err(syn::Error::new_spanned(arg, "unsupported instrument argument"))?,
-            }
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Err(syn::Error::new(
+                input.span(),
+                format!("`target` is required; expected one of: {}", target::allowed_targets()),
+            ));
         }
 
-        let target = target.ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!("`target` is required; expected one of: {}", target::allowed_targets()),
-            )
-        })?;
+        let target_expr = input.parse::<Expr>()?;
+        let target_span = target_expr.span();
+        let target = target::parse(&target_expr)?;
 
-        tracing_args.insert(0, quote! { skip_all });
+        parse_comma(input, "`name` is required and must be a string literal")?;
+        let name_expr = input.parse::<Expr>()?;
+        let name = name::parse(&name_expr)?;
+        let name_literal = LitStr::new(&name, name_expr.span());
+
+        parse_comma(input, "`level` is required")?;
+        let level_expr = input.parse::<Expr>()?;
+        let level = TelemetryLevel::parse(&level_expr)?;
+        let level_literal = LitStr::new(level.as_str(), level_expr.span());
+        let target_literal = LitStr::new(&target, target_span);
+
+        let user = parse_optional_user(input)?;
 
         Ok(Self {
-            tracing_args: quote! { #(#tracing_args),* },
+            tracing_args: quote! {
+                skip_all,
+                target = #target_literal,
+                name = #name_literal,
+                level = #level_literal
+            },
             target,
             name,
             level,
-            user: user_seen,
+            user,
         })
     }
 }
 
-fn name_value_arg(arg: Meta, name: &str) -> syn::Result<syn::MetaNameValue> {
-    match arg {
-        Meta::NameValue(meta) => Ok(meta),
-        _ => Err(syn::Error::new_spanned(
-            arg,
-            format!("{name} must be specified as a name-value argument"),
-        )),
+fn parse_comma(input: ParseStream<'_>, missing_message: &str) -> syn::Result<()> {
+    if input.is_empty() {
+        return Err(syn::Error::new(input.span(), missing_message));
     }
+
+    input.parse::<Token![,]>()?;
+    if input.is_empty() {
+        return Err(syn::Error::new(input.span(), missing_message));
+    }
+
+    Ok(())
+}
+
+fn parse_optional_user(input: ParseStream<'_>) -> syn::Result<bool> {
+    if input.is_empty() {
+        return Ok(false);
+    }
+
+    input.parse::<Token![,]>()?;
+    if input.is_empty() {
+        return Ok(false);
+    }
+
+    let user = user::try_parse_marker(input)?;
+    if !user {
+        let rest = input.parse::<proc_macro2::TokenStream>()?;
+        return Err(syn::Error::new_spanned(
+            rest,
+            "only optional `user` is supported after `level`",
+        ));
+    }
+
+    if input.is_empty() {
+        return Ok(true);
+    }
+
+    input.parse::<Token![,]>()?;
+    if input.is_empty() {
+        return Ok(true);
+    }
+
+    let rest = input.parse::<proc_macro2::TokenStream>()?;
+    Err(syn::Error::new_spanned(
+        rest,
+        "`user` may only be specified once and must be the final argument",
+    ))
 }
 
 fn expand_instrument(
@@ -157,13 +128,7 @@ fn expand_instrument(
     let description =
         doc_description(&attrs).map(|description| LitStr::new(&description, sig.ident.span()));
     let target = LitStr::new(&instrument_args.target, proc_macro2::Span::call_site());
-    let default_name;
-    let name = if let Some(name) = &instrument_args.name {
-        LitStr::new(name, sig.ident.span())
-    } else {
-        default_name = sig.ident.to_string();
-        LitStr::new(&default_name, sig.ident.span())
-    };
+    let name = LitStr::new(&instrument_args.name, sig.ident.span());
     let level = instrument_args.level;
     let tracing_args = instrument_args.tracing_args;
     let submit_metadata = metadata::submit_span_metadata(
@@ -245,47 +210,50 @@ fn trim_doc_lines(lines: &[String]) -> Option<&[String]> {
 mod tests {
     use quote::quote;
     use syn::parse::Parser;
-    use syn::punctuated::Punctuated;
-    use syn::{Meta, Token};
 
     use super::{InstrumentArgs, doc_description};
 
-    fn parse_args(
-        tokens: proc_macro2::TokenStream,
-    ) -> syn::punctuated::Punctuated<Meta, Token![,]> {
-        Punctuated::<Meta, Token![,]>::parse_terminated
-            .parse2(tokens)
-            .expect("test args should parse")
+    fn parse_args(tokens: proc_macro2::TokenStream) -> syn::Result<InstrumentArgs> {
+        (|input: syn::parse::ParseStream<'_>| InstrumentArgs::parse(input)).parse2(tokens)
     }
 
     #[test]
     fn requires_target() {
-        let err = InstrumentArgs::parse(parse_args(quote!(name = "test"))).unwrap_err();
+        let err = parse_args(quote!()).unwrap_err();
 
         assert!(err.to_string().contains("`target` is required"));
     }
 
     #[test]
+    fn requires_name() {
+        let err = parse_args(quote!(rpc)).unwrap_err();
+
+        assert!(err.to_string().contains("`name` is required"));
+    }
+
+    #[test]
+    fn requires_level() {
+        let err = parse_args(quote!(rpc, "test")).unwrap_err();
+
+        assert!(err.to_string().contains("`level` is required"));
+    }
+
+    #[test]
     fn rewrites_allowed_target_to_literal() {
-        let args =
-            InstrumentArgs::parse(parse_args(quote!(target = store::database, name = "test")))
-                .unwrap()
-                .tracing_args
-                .to_string();
+        let args = parse_args(quote!(store::database, "test", info))
+            .unwrap()
+            .tracing_args
+            .to_string();
 
         assert!(args.contains("skip_all"));
         assert!(args.contains("target = \"store::database\""));
         assert!(args.contains("name = \"test\""));
+        assert!(args.contains("level = \"info\""));
     }
 
     #[test]
     fn parses_level_metadata() {
-        let args = InstrumentArgs::parse(parse_args(quote!(
-            target = store::database,
-            level = debug,
-            name = "test"
-        )))
-        .unwrap();
+        let args = parse_args(quote!(store::database, "test", debug)).unwrap();
 
         assert_eq!(args.level, crate::level::TelemetryLevel::Debug);
         assert!(args.tracing_args.to_string().contains("level = \"debug\""));
@@ -293,8 +261,7 @@ mod tests {
 
     #[test]
     fn parses_user_marker() {
-        let args =
-            InstrumentArgs::parse(parse_args(quote!(target = rpc, name = "test", user))).unwrap();
+        let args = parse_args(quote!(rpc, "test", info, user)).unwrap();
 
         assert!(args.user);
         assert!(!args.tracing_args.to_string().contains("user"));
@@ -302,24 +269,25 @@ mod tests {
 
     #[test]
     fn rejects_user_value() {
-        let err =
-            InstrumentArgs::parse(parse_args(quote!(target = rpc, name = "test", user = true)))
-                .unwrap_err();
+        let err = parse_args(quote!(rpc, "test", info, user = true)).unwrap_err();
 
         assert!(err.to_string().contains("`user` is a bare marker"));
     }
 
     #[test]
     fn rejects_string_level_and_path_name() {
-        let level_err =
-            InstrumentArgs::parse(parse_args(quote!(target = store::database, level = "debug")))
-                .unwrap_err();
-        let name_err =
-            InstrumentArgs::parse(parse_args(quote!(target = store::database, name = test)))
-                .unwrap_err();
+        let level_err = parse_args(quote!(store::database, "test", "debug")).unwrap_err();
+        let name_err = parse_args(quote!(store::database, test, debug)).unwrap_err();
 
         assert!(level_err.to_string().contains("`level` must be one of"));
         assert!(name_err.to_string().contains("`name` must be a string literal"));
+    }
+
+    #[test]
+    fn rejects_named_syntax() {
+        let err = parse_args(quote!(target = rpc, name = "test", level = info)).unwrap_err();
+
+        assert!(err.to_string().contains("`target` must be an allowed target path"));
     }
 
     #[test]

@@ -106,7 +106,7 @@ impl Span {
     /// Records an event on this span.
     ///
     /// This exists for the Miden event macros. Emit events with `event!`, `trace!`, `debug!`,
-    /// `info!`, `warn!`, or `error!` so target validation and typed record handling are applied.
+    /// `info!`, `warn!`, or `error!` so target validation and metadata registration are applied.
     #[doc(hidden)]
     pub fn __record_event(
         &self,
@@ -237,24 +237,24 @@ mod tests {
     }
 
     /// Exercises error status recording for instrumented functions.
-    #[crate::instrument(target = rpc, name = "instrumented_error")]
+    #[crate::instrument(rpc, "instrumented_error", info)]
     fn instrumented_error(value: u32) -> Result<(), TestError> {
         let _ = value;
         Err(TestError { source: SourceError })
     }
 
-    #[crate::instrument(target = rpc, name = "instrumented_ok")]
+    #[crate::instrument(rpc, "instrumented_ok", info)]
     fn instrumented_ok(value: u32) -> Result<(), TestError> {
         let _ = value;
         Ok(())
     }
 
-    #[crate::instrument(target = rpc, name = "instrumented_user", user)]
+    #[crate::instrument(rpc, "instrumented_user", info, user)]
     fn instrumented_user() -> Result<(), TestError> {
         Ok(())
     }
 
-    #[crate::instrument(target = store::database, name = "instrumented_async_error")]
+    #[crate::instrument(store::database, "instrumented_async_error", info)]
     async fn instrumented_async_error(value: u32) -> Result<(), TestError> {
         let _ = value;
         Err(TestError { source: SourceError })
@@ -262,29 +262,29 @@ mod tests {
 
     #[allow(dead_code)]
     fn unused_manual_span_declaration() {
-        let _span = crate::error_span!(target = rpc, "unused_manual_span");
+        let _span = crate::error_span!(rpc, "unused_manual_span");
     }
 
     struct InstrumentedMethod;
 
     impl InstrumentedMethod {
-        /// Uses the method name as the default span name.
-        #[crate::instrument(target = rpc, level = debug)]
-        fn method_with_default_name(&self) -> Result<(), TestError> {
+        /// Uses an explicit method span name.
+        #[crate::instrument(rpc, "instrumented_method", debug)]
+        fn explicitly_named_method(&self) -> Result<(), TestError> {
             Ok(())
         }
     }
 
     trait InstrumentedTrait {
-        fn trait_method_with_default_name(&self) -> Result<(), TestError>;
+        fn explicitly_named_trait_method(&self) -> Result<(), TestError>;
     }
 
     impl InstrumentedTrait for InstrumentedMethod {
-        /// Uses the trait method name as the default span name.
+        /// Uses an explicit trait method span name.
         ///
         /// This also verifies trait impl methods.
-        #[crate::instrument(target = rpc, level = trace)]
-        fn trait_method_with_default_name(&self) -> Result<(), TestError> {
+        #[crate::instrument(rpc, "instrumented_trait_method", trace)]
+        fn explicitly_named_trait_method(&self) -> Result<(), TestError> {
             Ok(())
         }
     }
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn span_macro_creates_recordable_span() {
         let spans = exported_spans(|| {
-            let span = crate::info_span!(target = rpc, "manual_span");
+            let span = crate::info_span!(rpc, "manual_span");
             span.record_field(&TestField);
             let _guard = span.entered();
         });
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn span_macro_registers_metadata() {
-        let _span = crate::warn_span!(target = store::database, "manual_metadata_span", user);
+        let _span = crate::warn_span!(store::database, "manual_metadata_span", user);
 
         assert_registered_span("store::database", SpanLevel::Warn, "manual_metadata_span");
         assert_span_user_marker("manual_metadata_span", true);
@@ -335,29 +335,26 @@ mod tests {
     #[test]
     fn instrument_macro_registers_metadata() {
         let method = InstrumentedMethod;
-        method.method_with_default_name().unwrap();
-        method.trait_method_with_default_name().unwrap();
+        method.explicitly_named_method().unwrap();
+        method.explicitly_named_trait_method().unwrap();
         instrumented_user().unwrap();
 
         assert_registered_span("rpc", SpanLevel::Info, "instrumented_error");
         assert_registered_span("rpc", SpanLevel::Info, "instrumented_user");
         assert_registered_span("store::database", SpanLevel::Info, "instrumented_async_error");
-        assert_registered_span("rpc", SpanLevel::Debug, "method_with_default_name");
-        assert_registered_span("rpc", SpanLevel::Trace, "trait_method_with_default_name");
+        assert_registered_span("rpc", SpanLevel::Debug, "instrumented_method");
+        assert_registered_span("rpc", SpanLevel::Trace, "instrumented_trait_method");
         assert_registered_span("rpc", SpanLevel::Error, "unused_manual_span");
         assert_span_description(
             "instrumented_error",
             Some("Exercises error status recording for instrumented functions."),
         );
+        assert_span_description("instrumented_method", Some("Uses an explicit method span name."));
         assert_span_description(
-            "method_with_default_name",
-            Some("Uses the method name as the default span name."),
-        );
-        assert_span_description(
-            "trait_method_with_default_name",
+            "instrumented_trait_method",
             Some(
-                "Uses the trait method name as the default span name.\n\nThis also verifies trait \
-                 impl methods.",
+                "Uses an explicit trait method span name.\n\nThis also verifies trait impl \
+                 methods.",
             ),
         );
         assert_span_description("unused_manual_span", None);
@@ -402,7 +399,7 @@ mod tests {
     #[test]
     fn span_macro_marks_user_facing_span() {
         let spans = exported_spans(|| {
-            let span = crate::info_span!(target = rpc, "manual_user_span", user);
+            let span = crate::info_span!(rpc, "manual_user_span", user);
             let _guard = span.entered();
         });
         let span = exported_span_by_name(&spans, "manual_user_span");

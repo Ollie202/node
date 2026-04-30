@@ -32,6 +32,7 @@ pub use catalog::{
     registered_spans,
     registered_user_facing_metadata,
 };
+pub use event::Event;
 pub use field::OpenTelemetryField;
 pub use filter::{DEFAULT_FILTER, DynamicFilter, DynamicFilterError, DynamicFilterLayer};
 pub use miden_node_tracing_macro::{

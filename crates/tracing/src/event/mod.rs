@@ -1,8 +1,123 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 
 use opentelemetry::{Key, KeyValue, Value};
 
+use crate::span::Span;
 use crate::{OpenTelemetryField, OpenTelemetryObject, OpenTelemetryObjectRecorder};
+
+/// A macro-created event with Miden OpenTelemetry recording helpers.
+///
+/// Events are emitted when this value is dropped. Using an event macro as a standalone statement
+/// therefore emits immediately, while binding the returned value lets callers record typed
+/// attributes first.
+#[derive(Debug)]
+pub struct Event {
+    span: Option<Span>,
+    name: Option<Cow<'static, str>>,
+    recorder: RefCell<Option<OpenTelemetryEventRecorder>>,
+}
+
+impl Event {
+    /// Creates an enabled event wrapper.
+    ///
+    /// This exists for the Miden event macros. Create events with `event!`, `trace!`, `debug!`,
+    /// `info!`, `warn!`, or `error!` so target validation and metadata registration are applied
+    /// consistently.
+    #[doc(hidden)]
+    pub fn __new(
+        span: Span,
+        name: impl Into<Cow<'static, str>>,
+        recorder: OpenTelemetryEventRecorder,
+    ) -> Self {
+        Self {
+            span: Some(span),
+            name: Some(name.into()),
+            recorder: RefCell::new(Some(recorder)),
+        }
+    }
+
+    /// Creates a disabled event wrapper.
+    ///
+    /// This exists for the event macros when tracing filters reject the target or level. Recording
+    /// methods become no-ops, so callers can use the same code path for enabled and disabled
+    /// events.
+    #[doc(hidden)]
+    pub fn __disabled() -> Self {
+        Self {
+            span: None,
+            name: None,
+            recorder: RefCell::new(None),
+        }
+    }
+
+    /// Records `field` using its default key.
+    pub fn record_field<F>(&self, field: &F)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.with_recorder(|recorder| recorder.record_field(field));
+    }
+
+    /// Records `field` using `key` instead of its default key.
+    pub fn record_field_as<F>(&self, field: &F, key: impl Into<Key>)
+    where
+        F: OpenTelemetryField + ?Sized,
+    {
+        self.with_recorder(|recorder| recorder.record_field_as(field, key));
+    }
+
+    /// Records `object` using its default key prefix.
+    pub fn record_object<O>(&self, object: &O)
+    where
+        O: OpenTelemetryObject + ?Sized,
+    {
+        self.with_recorder(|recorder| recorder.record_object(object));
+    }
+
+    /// Records `object` using `key_prefix` instead of its default key prefix.
+    pub fn record_object_as<O>(&self, object: &O, key_prefix: &str)
+    where
+        O: OpenTelemetryObject + ?Sized,
+    {
+        self.with_recorder(|recorder| recorder.record_object_as(object, key_prefix));
+    }
+
+    /// Emits this event immediately.
+    ///
+    /// Calling this is optional because events also emit on drop. Use it when the exact emission
+    /// point matters after recording attributes.
+    pub fn emit(mut self) {
+        self.emit_inner();
+    }
+
+    fn with_recorder(&self, record: impl FnOnce(&mut OpenTelemetryEventRecorder)) {
+        let mut recorder = self.recorder.borrow_mut();
+        if let Some(recorder) = recorder.as_mut() {
+            record(recorder);
+        }
+    }
+
+    fn emit_inner(&mut self) {
+        let Some(span) = self.span.take() else {
+            return;
+        };
+        let Some(name) = self.name.take() else {
+            return;
+        };
+        let Some(recorder) = self.recorder.get_mut().take() else {
+            return;
+        };
+
+        span.__record_event(name, recorder);
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        self.emit_inner();
+    }
+}
 
 /// Records typed attributes for a macro-created event.
 #[derive(Debug, Default)]
@@ -153,22 +268,28 @@ mod tests {
     }
 
     #[test]
-    fn event_macro_records_fields_and_objects() {
+    fn event_macro_returns_recordable_event() {
         let spans = exported_spans(|| {
             let span = tracing::info_span!("event_parent");
             let _guard = span.enter();
 
-            crate::info!(
-                target = rpc,
+            let event = crate::info!(
+                rpc,
+                "recorded event",
                 user,
-                field(TestField),
-                field(custom.field = TestField),
-                object(TestObject),
-                object(custom = TestObject),
-                "recorded {}",
-                "event"
+                justification = "tests event attribute recording"
             );
-            crate::info!(target = rpc, "internal event");
+            event.record_field(&TestField);
+            event.record_field_as(&TestField, "custom.field");
+            event.record_object(&TestObject);
+            event.record_object_as(&TestObject, "custom_object");
+            event.emit();
+
+            crate::info!(
+                rpc,
+                "internal event",
+                justification = "tests non-user event metadata registration"
+            );
         });
         let span = spans
             .iter()
@@ -187,9 +308,10 @@ mod tests {
         assert_attribute(&event.attributes, "field.default", "value");
         assert_attribute(&event.attributes, "custom.field", "value");
         assert_attribute(&event.attributes, "object.field", "value");
-        assert_registered_event("rpc", SpanLevel::Info, "recorded {}", true);
+        assert_attribute(&event.attributes, "custom_object.field", "value");
+        assert_registered_event("rpc", SpanLevel::Info, "recorded event", true);
         assert_registered_event("rpc", SpanLevel::Info, "internal event", false);
-        assert_registered_user_event("rpc", SpanLevel::Info, "recorded {}");
+        assert_registered_user_event("rpc", SpanLevel::Info, "recorded event");
         assert_no_registered_user_event("internal event");
     }
 
