@@ -36,8 +36,15 @@ pub use catalog::{
 };
 pub use event::Event;
 pub use field::OpenTelemetryField;
-pub use filter::{DEFAULT_FILTER, FilterError};
-pub use install::{DEFAULT_USER_LOG_FILTER, InstallError, TracingConfig, TracingHandle, install};
+pub use filter::FilterError;
+pub use install::{
+    DEFAULT_OTEL_FILTER,
+    DEFAULT_USER_LOG_FILTER,
+    InstallError,
+    TracingConfig,
+    TracingHandle,
+    install,
+};
 pub use miden_node_tracing_macro::{
     debug,
     debug_span,
@@ -55,15 +62,7 @@ pub use miden_node_tracing_macro::{
 pub use object::{OpenTelemetryObject, OpenTelemetryObjectRecorder};
 pub use span::Span;
 
-/// Installs the tracing panic hook.
-///
-/// The hook is process-global and idempotent. It records panic details on the active tracing span,
-/// or on a fallback `spanless_panic` span when the panic happens without an active span. The
-/// previous panic hook is still invoked after tracing has recorded the panic metadata.
-///
-/// Rust cannot make panic-hook registration mandatory at compile time. Subscriber/exporter setup
-/// should call this unconditionally once this crate owns that setup path.
-pub fn install_panic_hook() {
+fn install_panic_hook() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
 
     INSTALL.call_once(|| {

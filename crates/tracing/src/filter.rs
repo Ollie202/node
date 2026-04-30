@@ -7,8 +7,8 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::internal;
 
-/// Default trace filter used when `RUST_LOG` is not set.
-pub const DEFAULT_FILTER: &str = "info";
+/// Default filter used when callers do not provide an initial exporter filter.
+pub(crate) const DEFAULT_FILTER: &str = "info";
 
 const ALLOWED_TARGETS: &[&str] = &[
     "rpc",

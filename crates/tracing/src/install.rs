@@ -4,8 +4,11 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::prelude::*;
 
 use crate::filter::{DynamicFilter, FilterError};
+use crate::internal;
 use crate::stdout::UserFacingStdoutExporter;
-use crate::{DEFAULT_FILTER, internal};
+
+/// Default filter used for OpenTelemetry exports.
+pub const DEFAULT_OTEL_FILTER: &str = crate::filter::DEFAULT_FILTER;
 
 /// Default filter used for user-facing stdout logs.
 pub const DEFAULT_USER_LOG_FILTER: &str = "info";
@@ -25,7 +28,7 @@ pub struct TracingConfig {
 impl Default for TracingConfig {
     fn default() -> Self {
         Self {
-            otel_filter: DEFAULT_FILTER.to_owned(),
+            otel_filter: DEFAULT_OTEL_FILTER.to_owned(),
             user_log_filter: DEFAULT_USER_LOG_FILTER.to_owned(),
         }
     }
@@ -187,14 +190,13 @@ impl std::error::Error for InstallError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_USER_LOG_FILTER, TracingConfig};
-    use crate::DEFAULT_FILTER;
+    use super::{DEFAULT_OTEL_FILTER, DEFAULT_USER_LOG_FILTER, TracingConfig};
 
     #[test]
     fn default_config_initializes_both_filters() {
         let config = TracingConfig::default();
 
-        assert_eq!(config.otel_filter, DEFAULT_FILTER);
+        assert_eq!(config.otel_filter, DEFAULT_OTEL_FILTER);
         assert_eq!(config.user_log_filter, DEFAULT_USER_LOG_FILTER);
     }
 
