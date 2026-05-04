@@ -31,6 +31,7 @@ use crate::db::Db;
 use crate::errors::{DatabaseError, ProofSchedulerError};
 use crate::proven_tip::ProvenTipWriter;
 use crate::server::block_prover_client::{BlockProver, StoreProverError};
+use crate::state::{ProofCache, ProofNotification};
 
 // CONSTANTS
 // ================================================================================================
@@ -68,13 +69,14 @@ impl ProofTaskJoinSet {
         block_store: &Arc<BlockStore>,
         proven_tip: &Arc<ProvenTipWriter>,
         block_num: BlockNumber,
+        proof_cache: ProofCache,
     ) {
         let db = Arc::clone(db);
         let block_prover = Arc::clone(block_prover);
         let block_store = Arc::clone(block_store);
         let proven_tip = Arc::clone(proven_tip);
         self.0.spawn(async move {
-            prove_block(&db, &block_prover, &block_store, &proven_tip, block_num).await
+            prove_block(&db, &block_prover, &block_store, &proven_tip, block_num, proof_cache).await
         });
     }
 
@@ -99,7 +101,8 @@ impl ProofTaskJoinSet {
 /// Spawns the proof scheduler as a background tokio task.
 ///
 /// The scheduler uses `chain_tip_rx` to learn about newly committed blocks and queries the DB
-/// for unproven blocks to prove.
+/// for unproven blocks to prove. After each proof is saved, the result is pushed into
+/// `proof_cache` and the proven tip watch is advanced so replica subscribers are notified.
 ///
 /// Returns a [`JoinHandle`] that resolves when the scheduler encounters a fatal error or
 /// completes unexpectedly.
@@ -110,6 +113,7 @@ pub fn spawn(
     chain_tip_rx: watch::Receiver<BlockNumber>,
     proven_tip: ProvenTipWriter,
     max_concurrent_proofs: NonZeroUsize,
+    proof_cache: ProofCache,
 ) -> JoinHandle<anyhow::Result<()>> {
     let proven_tip = Arc::new(proven_tip);
     tokio::spawn(run(
@@ -119,6 +123,7 @@ pub fn spawn(
         chain_tip_rx,
         proven_tip,
         max_concurrent_proofs,
+        proof_cache,
     ))
 }
 
@@ -138,6 +143,7 @@ async fn run(
     mut chain_tip_rx: watch::Receiver<BlockNumber>,
     proven_tip: Arc<ProvenTipWriter>,
     max_concurrent_proofs: NonZeroUsize,
+    proof_cache: ProofCache,
 ) -> anyhow::Result<()> {
     info!(target: COMPONENT, "Proof scheduler started");
 
@@ -160,7 +166,14 @@ async fn run(
             }
 
             for block_num in unproven {
-                join_set.spawn(&db, &block_prover, &block_store, &proven_tip, block_num);
+                join_set.spawn(
+                    &db,
+                    &block_prover,
+                    &block_store,
+                    &proven_tip,
+                    block_num,
+                    proof_cache.clone(),
+                );
             }
         }
 
@@ -197,6 +210,7 @@ async fn prove_block(
     block_store: &BlockStore,
     proven_tip: &ProvenTipWriter,
     block_num: BlockNumber,
+    proof_cache: ProofCache,
 ) -> anyhow::Result<()> {
     tokio::time::timeout(BLOCK_PROVE_OVERALL_TIMEOUT, async {
         let mut attempt: u32 = 0;
@@ -221,14 +235,19 @@ async fn prove_block(
 
             match result {
                 Ok(Ok(proof)) => {
+                    let proof_bytes = proof.to_bytes();
+
                     // Save the block proof to file.
-                    block_store.save_proof(block_num, &proof.to_bytes()).await?;
+                    block_store.save_proof(block_num, &proof_bytes).await?;
 
                     // Mark the block as proven and advance the sequence in the database.
                     let tip = db.mark_proven_and_advance_sequence(block_num).await?;
                     tracing::Span::current().record("proven_chain_tip", tip.as_u32());
 
-                    // Advance the cached proven tip if the new tip is higher.
+                    // Cache the proof bytes for replica subscriptions.
+                    proof_cache.push(block_num, ProofNotification::new(block_num, proof_bytes));
+
+                    // Advance the proven tip (this also notifies replica watch subscribers).
                     proven_tip.advance(tip);
 
                     return Ok(());
