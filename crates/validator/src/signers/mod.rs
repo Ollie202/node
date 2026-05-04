@@ -36,7 +36,10 @@ impl ValidatorSigner {
                 Ok(sig)
             },
             Self::Local(signer) => {
-                let sig = <SecretKey as BlockSigner>::sign(signer, header).await?;
+                let sig = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(<SecretKey as BlockSigner>::sign(signer, header))
+                })?;
                 Ok(sig)
             },
         }

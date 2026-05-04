@@ -39,23 +39,28 @@ pub async fn validate_transaction(
     proven_tx: ProvenTransaction,
     tx_inputs: TransactionInputs,
 ) -> Result<ValidatedTransaction, TransactionValidationError> {
-    // First, verify the transaction proof
-    info_span!("verify").in_scope(|| {
-        let tx_verifier = TransactionVerifier::new(MIN_PROOF_SECURITY_LEVEL);
-        tx_verifier.verify(&proven_tx)
+    // Proof verification is CPU-intensive; run it in a blocking context.
+    tokio::task::block_in_place(|| {
+        info_span!("verify").in_scope(|| {
+            let tx_verifier = TransactionVerifier::new(MIN_PROOF_SECURITY_LEVEL);
+            tx_verifier.verify(&proven_tx)
+        })
     })?;
 
     // Create a DataStore from the transaction inputs.
     let data_store = TransactionInputsDataStore::new(tx_inputs.clone());
 
-    // Execute the transaction.
+    // VM execution may not yield; run it in a blocking context to avoid stalling the runtime.
     let (account, block_header, _, input_notes, tx_args) = tx_inputs.into_parts();
     let executor: TransactionExecutor<'_, '_, _, UnreachableAuth> =
         TransactionExecutor::new(&data_store);
-    let executed_tx = executor
-        .execute_transaction(account.id(), block_header.block_num(), input_notes, tx_args)
-        .instrument(info_span!("execute"))
-        .await?;
+    let executed_tx = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(
+            executor
+                .execute_transaction(account.id(), block_header.block_num(), input_notes, tx_args)
+                .instrument(info_span!("execute")),
+        )
+    })?;
 
     // Validate that the executed transaction matches the submitted transaction.
     let executed_tx_header: TransactionHeader = (&executed_tx).into();
