@@ -316,13 +316,21 @@ impl NtxContext {
     #[instrument(target = COMPONENT, name = "ntx.execute_transaction.prove", skip_all, err)]
     async fn prove(&self, tx_inputs: &TransactionInputs) -> NtxResult<ProvenTransaction> {
         if let Some(remote) = &self.prover {
-            remote.prove(tx_inputs).await
+            remote.prove(tx_inputs).await.map_err(NtxError::Proving)
         } else {
-            // Only perform tx inputs clone for local proving.
+            // ZK proof generation is CPU-intensive; run it on a dedicated blocking thread.
             let tx_inputs = tx_inputs.clone();
-            LocalTransactionProver::default().prove(tx_inputs).await
+            tokio::task::spawn_blocking(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build tokio runtime")
+                    .block_on(LocalTransactionProver::default().prove(tx_inputs))
+            })
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+            .map_err(NtxError::Proving)
         }
-        .map_err(NtxError::Proving)
     }
 
     /// Submits the transaction to the block producer.
