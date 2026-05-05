@@ -39,28 +39,36 @@ pub async fn validate_transaction(
     proven_tx: ProvenTransaction,
     tx_inputs: TransactionInputs,
 ) -> Result<ValidatedTransaction, TransactionValidationError> {
-    // Proof verification is CPU-intensive; run it in a blocking context.
-    tokio::task::block_in_place(|| {
+    // Proof verification is CPU-intensive; run it on a dedicated blocking thread.
+    let proven_tx_clone = proven_tx.clone();
+    tokio::task::spawn_blocking(move || {
         info_span!("verify").in_scope(|| {
-            let tx_verifier = TransactionVerifier::new(MIN_PROOF_SECURITY_LEVEL);
-            tx_verifier.verify(&proven_tx)
+            TransactionVerifier::new(MIN_PROOF_SECURITY_LEVEL).verify(&proven_tx_clone)
         })
-    })?;
+    })
+    .await
+    .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))?;
 
     // Create a DataStore from the transaction inputs.
     let data_store = TransactionInputsDataStore::new(tx_inputs.clone());
 
-    // VM execution may not yield; run it in a blocking context to avoid stalling the runtime.
+    // VM execution may not yield; run it on a dedicated blocking thread.
     let (account, block_header, _, input_notes, tx_args) = tx_inputs.into_parts();
-    let executor: TransactionExecutor<'_, '_, _, UnreachableAuth> =
-        TransactionExecutor::new(&data_store);
-    let executed_tx = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(
-            executor
-                .execute_transaction(account.id(), block_header.block_num(), input_notes, tx_args)
-                .instrument(info_span!("execute")),
-        )
-    })?;
+    let execute_span = info_span!("execute");
+    let executed_tx = tokio::task::spawn_blocking(move || {
+        let executor: TransactionExecutor<'_, '_, _, UnreachableAuth> =
+            TransactionExecutor::new(&data_store);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(
+                executor
+                    .execute_transaction(account.id(), block_header.block_num(), input_notes, tx_args)
+                    .instrument(execute_span),
+            )
+    })
+    .await
+    .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))?;
 
     // Validate that the executed transaction matches the submitted transaction.
     let executed_tx_header: TransactionHeader = (&executed_tx).into();

@@ -36,10 +36,16 @@ impl ValidatorSigner {
                 Ok(sig)
             },
             Self::Local(signer) => {
-                let sig = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(<SecretKey as BlockSigner>::sign(signer, header))
-                })?;
+                let signer = signer.clone();
+                let header = header.clone();
+                let sig = tokio::task::spawn_blocking(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .expect("failed to build tokio runtime")
+                        .block_on(<SecretKey as BlockSigner>::sign(&signer, &header))
+                })
+                .await
+                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))?;
                 Ok(sig)
             },
         }
