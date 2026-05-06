@@ -137,6 +137,6 @@ impl ProveRequest for LocalBlockProver {
                 .map_err(|e| tonic::Status::internal(e.as_report_context("failed to prove block")))
         })
         .await
-        .map_err(|e| tonic::Status::internal(format!("block prover task panicked: {e}")))?
+        .map_err(|e| tonic::Status::internal(e.as_report("block prover task panicked")))?
     }
 }
