@@ -3200,6 +3200,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "fs-err",
  "hex",
  "humantime",
  "maud",
