@@ -16,9 +16,9 @@ fn main() {
     let out_dir_str = env::var("OUT_DIR").expect("OUT_DIR must be set");
     let out_dir = Path::new(&out_dir_str);
 
-    let counter_masm = std::fs::read_to_string("src/assets/counter_program.masm")
+    let counter_masm = fs_err::read_to_string("src/assets/counter_program.masm")
         .expect("src/assets/counter_program.masm must exist");
-    let note_masm = std::fs::read_to_string("src/assets/increment_counter.masm")
+    let note_masm = fs_err::read_to_string("src/assets/increment_counter.masm")
         .expect("src/assets/increment_counter.masm must exist");
 
     let assembler = TransactionKernel::assembler().with_warnings_as_errors(true);
