@@ -7,7 +7,6 @@ help:
 # -- variables ------------------------------------------------------------------------------------
 
 WARNINGS=RUSTDOCFLAGS="-D warnings"
-CONTAINER_RUNTIME ?= docker
 STRESS_TEST_DATA_DIR ?= stress-test-store-$(shell date +%Y%m%d-%H%M%S)
 COMPOSE_FILES = -f docker-compose.yml -f compose/telemetry.yml -f compose/monitor.yml
 
@@ -105,6 +104,10 @@ build: ## Builds all crates and re-builds protobuf bindings for proto crates
 install-node: ## Installs node
 	cargo install --path bin/node --locked
 
+.PHONY: install-validator
+install-validator: ## Installs validator
+	cargo install --path bin/validator --locked
+
 .PHONY: install-remote-prover
 install-remote-prover: ## Install remote prover's CLI
 	cargo install --path bin/remote-prover --bin miden-remote-prover --locked
@@ -130,46 +133,81 @@ install-network-monitor: ## Installs network monitor binary
 
 .PHONY: compose-genesis
 compose-genesis: ## Wipes node volumes and creates a fresh genesis block
-	$(CONTAINER_RUNTIME) compose $(COMPOSE_FILES) down --volumes --remove-orphans
-	$(CONTAINER_RUNTIME) volume rm -f miden-node_node-data
-	$(CONTAINER_RUNTIME) compose $(COMPOSE_FILES) --profile genesis run --rm genesis
+	docker compose $(COMPOSE_FILES) down --volumes --remove-orphans
+	docker volume rm -f miden-node_node-data
+	docker compose $(COMPOSE_FILES) --profile genesis run --rm genesis-store
+	docker compose $(COMPOSE_FILES) --profile genesis rm -f
 
 .PHONY: compose-up
 compose-up: ## Starts all node components, telemetry, and monitor via docker compose
-	$(CONTAINER_RUNTIME) compose $(COMPOSE_FILES) up -d
+	docker compose $(COMPOSE_FILES) up -d
 
 .PHONY: compose-down
 compose-down: ## Stops and removes all containers via docker compose
-	$(CONTAINER_RUNTIME) compose $(COMPOSE_FILES) down
+	docker compose $(COMPOSE_FILES) down
 
 .PHONY: compose-logs
 compose-logs: ## Follows logs for all components via docker compose
-	$(CONTAINER_RUNTIME) compose $(COMPOSE_FILES) logs -f
+	docker compose $(COMPOSE_FILES) logs -f
+
+.PHONY: docker-build
+docker-build: docker-build-node docker-build-validator docker-build-ntx-builder docker-build-monitor ## Builds all Docker images
 
 .PHONY: docker-build-node
-docker-build-node: ## Builds the Miden node using Docker (override with CONTAINER_RUNTIME=podman)
+docker-build-node: ## Builds the Miden node using Docker
 	@CREATED=$$(date) && \
 	VERSION=$$(cat bin/node/Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
 	COMMIT=$$(git rev-parse HEAD) && \
-	$(CONTAINER_RUNTIME) build --build-arg CREATED="$$CREATED" \
-        		 --build-arg VERSION="$$VERSION" \
-          		 --build-arg COMMIT="$$COMMIT" \
-                 -f bin/node/Dockerfile \
-                 -t miden-node-image .
+	docker build --build-arg CREATED="$$CREATED" \
+                 --build-arg VERSION="$$VERSION" \
+                 --build-arg COMMIT="$$COMMIT" \
+                 --build-arg BIN=miden-node \
+                 --build-arg PORT=57291 \
+                 -t miden-node .
+
+.PHONY: docker-build-validator
+docker-build-validator: ## Builds the Miden validator using Docker
+	@CREATED=$$(date) && \
+	VERSION=$$(cat bin/validator/Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	docker build --build-arg CREATED="$$CREATED" \
+                 --build-arg VERSION="$$VERSION" \
+                 --build-arg COMMIT="$$COMMIT" \
+                 --build-arg BIN=miden-validator \
+                 --build-arg PORT=50101 \
+                 -t miden-validator .
+
+.PHONY: docker-build-ntx-builder
+docker-build-ntx-builder: ## Builds the Miden network transaction builder using Docker
+	@CREATED=$$(date) && \
+	VERSION=$$(cat bin/ntx-builder/Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	docker build --build-arg CREATED="$$CREATED" \
+                 --build-arg VERSION="$$VERSION" \
+                 --build-arg COMMIT="$$COMMIT" \
+                 --build-arg BIN=miden-ntx-builder \
+                 --build-arg PORT=50301 \
+                 -t miden-ntx-builder .
 
 .PHONY: docker-build-monitor
-docker-build-monitor: ## Builds the network monitor using Docker (override with CONTAINER_RUNTIME=podman)
-	$(CONTAINER_RUNTIME) build \
-                 -f bin/network-monitor/Dockerfile \
-                 -t miden-network-monitor-image .
+docker-build-monitor: ## Builds the network monitor using Docker
+	@CREATED=$$(date) && \
+	VERSION=$$(cat bin/network-monitor/Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	docker build --build-arg CREATED="$$CREATED" \
+                 --build-arg VERSION="$$VERSION" \
+                 --build-arg COMMIT="$$COMMIT" \
+                 --build-arg BIN=miden-network-monitor \
+                 --build-arg PORT=3000 \
+                 -t miden-network-monitor .
 
 .PHONY: docker-run-node
-docker-run-node: ## Runs the Miden node as a Docker container (override with CONTAINER_RUNTIME=podman)
-	$(CONTAINER_RUNTIME) volume create miden-db
-	$(CONTAINER_RUNTIME) run --name miden-node \
+docker-run-node: ## Runs the Miden node as a Docker container
+	docker volume create miden-db
+	docker run --name miden-node \
 			   -p 57291:57291 \
                -v miden-db:/db \
-               -d miden-node-image
+               -d miden-node
 
 ## --- setup --------------------------------------------------------------------------------------
 

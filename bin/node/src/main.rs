@@ -32,14 +32,6 @@ pub enum Command {
     /// Commands related to the node's block-producer component.
     #[command(subcommand)]
     BlockProducer(commands::block_producer::BlockProducerCommand),
-
-    /// Commands related to the node's validator component.
-    #[command(subcommand)]
-    Validator(commands::validator::ValidatorCommand),
-
-    /// Commands related to the node's network transaction builder component.
-    #[command(subcommand)]
-    NtxBuilder(commands::ntx_builder::NtxBuilderCommand),
 }
 
 impl Command {
@@ -51,8 +43,6 @@ impl Command {
             Command::Store(subcommand) => subcommand.is_open_telemetry_enabled(),
             Command::Rpc(subcommand) => subcommand.is_open_telemetry_enabled(),
             Command::BlockProducer(subcommand) => subcommand.is_open_telemetry_enabled(),
-            Command::Validator(subcommand) => subcommand.is_open_telemetry_enabled(),
-            Command::NtxBuilder(subcommand) => subcommand.is_open_telemetry_enabled(),
         } {
             OpenTelemetry::Enabled
         } else {
@@ -65,8 +55,6 @@ impl Command {
             Command::Rpc(rpc_command) => rpc_command.handle().await,
             Command::Store(store_command) => store_command.handle().await,
             Command::BlockProducer(block_producer_command) => block_producer_command.handle().await,
-            Command::Validator(validator) => validator.handle().await,
-            Command::NtxBuilder(ntx_builder) => ntx_builder.handle().await,
         }
     }
 }
