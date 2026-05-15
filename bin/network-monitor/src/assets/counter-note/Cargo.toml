@@ -1,10 +1,10 @@
 cargo-features = ["trim-paths"]
 
 [package]
-name = "counter-note"
 description = "Network monitor counter increment note script"
-version = "0.1.0"
-edition = "2024"
+edition     = "2024"
+name        = "counter-note"
+version     = "0.1.0"
 
 [workspace]
 

@@ -29,12 +29,10 @@ fn main() {
     let out_dir = Path::new(&out_dir_str);
 
     if has_cargo_miden() {
-        let counter_package = compile_miden_project(
-            manifest_dir.join("src/assets/counter-contract"),
-            "counter-contract",
-        );
-        let note_package =
-            compile_miden_project(manifest_dir.join("src/assets/counter-note"), "counter-note");
+        let counter_project_dir = manifest_dir.join("src/assets/counter-contract");
+        let note_project_dir = manifest_dir.join("src/assets/counter-note");
+        let counter_package = compile_miden_project(&counter_project_dir, "counter-contract");
+        let note_package = compile_miden_project(&note_project_dir, "counter-note");
 
         fs_err::copy(counter_package, out_dir.join("counter_contract.masp"))
             .expect("copying counter contract package should succeed");
@@ -50,7 +48,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(compiled_miden_rust_assets)");
 }
 
-fn compile_miden_project(project_dir: PathBuf, package_name: &str) -> PathBuf {
+fn compile_miden_project(project_dir: &Path, package_name: &str) -> PathBuf {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
         .current_dir(&project_dir)
@@ -63,15 +61,14 @@ fn compile_miden_project(project_dir: PathBuf, package_name: &str) -> PathBuf {
             )
         });
 
-    if !output.status.success() {
-        panic!(
-            "`cargo miden build --release` failed in {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
-            project_dir.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "`cargo miden build --release` failed in {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        project_dir.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let package_path = project_dir
         .join("target/miden/release")
