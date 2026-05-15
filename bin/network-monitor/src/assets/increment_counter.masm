@@ -1,6 +1,7 @@
 # Note script to increment the external counter contract.
-# This script is executed as a note and calls the
-# `counter_contract::increment` entrypoint.
+# This MASM fallback keeps the node workspace build independent from cargo-miden.
+# The Rust sources in counter-contract/ and counter-note/ are the maintainable
+# source path and are compiled by build.rs when cargo-miden is installed.
 
 use miden::monitor::counter_contract
 

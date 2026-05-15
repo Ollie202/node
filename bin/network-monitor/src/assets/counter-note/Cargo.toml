@@ -1,0 +1,33 @@
+cargo-features = ["trim-paths"]
+
+[package]
+name = "counter-note"
+description = "Network monitor counter increment note script"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+miden = "0.12"
+
+[package.metadata.miden]
+project-kind = "note-script"
+
+[package.metadata.component]
+package = "miden:monitor-counter-note"
+
+[package.metadata.miden.dependencies]
+"miden:monitor-counter-contract" = { path = "../counter-contract" }
+
+[package.metadata.component.target.dependencies]
+"miden:monitor-counter-account" = { path = "../counter-contract/target/generated-wit/" }
+
+[profile.release]
+trim-paths = ["diagnostics", "object"]
+
+[profile.dev]
+trim-paths = ["diagnostics", "object"]

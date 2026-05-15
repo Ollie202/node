@@ -2,6 +2,10 @@
 # Storage layout:
 # - OWNER_SLOT: authorized wallet account id as [suffix, prefix, 0, 0]
 # - COUNTER_SLOT: counter value (u64)
+#
+# This MASM fallback keeps the node workspace build independent from cargo-miden.
+# The Rust sources in counter-contract/ and counter-note/ are the maintainable
+# source path and are compiled by build.rs when cargo-miden is installed.
 
 use miden::core::sys
 use miden::protocol::active_account

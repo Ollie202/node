@@ -27,6 +27,7 @@
 - [BREAKING] Renamed `--url` CLI flags and `*_URL` env vars to `--listen` / `*_LISTEN` across all components.
 - [BREAKING] Removed `miden-node validator` subcommand and created a separate `miden-validator` binary ([#2053](https://github.com/0xMiden/node/pull/2053)).
 - [BREAKING] Removed `miden-node ntx-builder` subcommand and created a separate `miden-ntx-builder` binary ([#2067](https://github.com/0xMiden/node/pull/2067)).
+- Compile the network monitor counter account and note script from Rust sources via the Miden Rust compiler ([#1831](https://github.com/0xMiden/node/issues/1831)).
 
 ## v0.14.10 (2026-05-29)
 

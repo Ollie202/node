@@ -29,6 +29,8 @@ use miden_protocol::note::{
 };
 use miden_protocol::transaction::{InputNotes, PartialBlockchain, TransactionArgs};
 use miden_protocol::utils::serde::{Deserializable, Serializable};
+#[cfg(compiled_miden_rust_assets)]
+use miden_protocol::vm::Package;
 use miden_protocol::{Felt, Word};
 use miden_standards::account::interface::{AccountInterface, AccountInterfaceExt};
 use miden_standards::note::{NetworkAccountTarget, NoteExecutionHint};
@@ -65,8 +67,20 @@ const REGENERATE_COOLDOWN: Duration = Duration::from_secs(3600);
 // ================================================================================================
 
 static INCREMENT_NOTE_SCRIPT: LazyLock<NoteScript> = LazyLock::new(|| {
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/increment_note_script.bin"));
-    NoteScript::read_from_bytes(bytes).expect("increment note script should be valid")
+    #[cfg(compiled_miden_rust_assets)]
+    {
+        let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/counter_note.masp"));
+        let package =
+            Package::read_from_bytes(bytes).expect("counter note package should be valid");
+        NoteScript::from_package(&package)
+            .expect("counter note package should contain a note script")
+    }
+
+    #[cfg(not(compiled_miden_rust_assets))]
+    {
+        let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/increment_note_script.bin"));
+        NoteScript::read_from_bytes(bytes).expect("increment note script should be valid")
+    }
 });
 
 #[derive(Debug, Default, Clone)]

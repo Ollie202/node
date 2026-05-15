@@ -1,0 +1,7 @@
+# This crate is compiled to Wasm as input to the Miden compiler.
+
+[build]
+target = "wasm32-wasip2"
+
+[target.wasm32-wasip2]
+rustflags = ["--cfg", "miden"]

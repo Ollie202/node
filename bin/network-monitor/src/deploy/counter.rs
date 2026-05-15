@@ -3,7 +3,12 @@
 use std::path::Path;
 
 use anyhow::Result;
+#[cfg(not(compiled_miden_rust_assets))]
+use miden_protocol::account::StorageSlot;
+#[cfg(not(compiled_miden_rust_assets))]
 use miden_protocol::account::component::AccountComponentMetadata;
+#[cfg(compiled_miden_rust_assets)]
+use miden_protocol::account::component::{InitStorageData, StorageValueName};
 use miden_protocol::account::{
     Account,
     AccountBuilder,
@@ -12,12 +17,14 @@ use miden_protocol::account::{
     AccountId,
     AccountStorageMode,
     AccountType,
-    StorageSlot,
     StorageSlotName,
 };
+#[cfg(not(compiled_miden_rust_assets))]
 use miden_protocol::assembly::Library;
 use miden_protocol::utils::serde::Deserializable;
 use miden_protocol::utils::sync::LazyLock;
+#[cfg(compiled_miden_rust_assets)]
+use miden_protocol::vm::Package;
 use miden_protocol::{Felt, Word};
 use miden_standards::testing::account_component::IncrNonceAuthComponent;
 use tracing::instrument;
@@ -25,15 +32,40 @@ use tracing::instrument;
 use crate::COMPONENT;
 
 pub static OWNER_SLOT_NAME: LazyLock<StorageSlotName> = LazyLock::new(|| {
-    StorageSlotName::new("miden::monitor::counter_contract::owner")
-        .expect("storage slot name should be valid")
+    #[cfg(compiled_miden_rust_assets)]
+    {
+        StorageSlotName::new("miden_monitor_counter_contract::counter_contract::owner")
+            .expect("storage slot name should be valid")
+    }
+
+    #[cfg(not(compiled_miden_rust_assets))]
+    {
+        StorageSlotName::new("miden::monitor::counter_contract::owner")
+            .expect("storage slot name should be valid")
+    }
 });
 
 pub static COUNTER_SLOT_NAME: LazyLock<StorageSlotName> = LazyLock::new(|| {
-    StorageSlotName::new("miden::monitor::counter_contract::counter")
-        .expect("storage slot name should be valid")
+    #[cfg(compiled_miden_rust_assets)]
+    {
+        StorageSlotName::new("miden_monitor_counter_contract::counter_contract::counter")
+            .expect("storage slot name should be valid")
+    }
+
+    #[cfg(not(compiled_miden_rust_assets))]
+    {
+        StorageSlotName::new("miden::monitor::counter_contract::counter")
+            .expect("storage slot name should be valid")
+    }
 });
 
+#[cfg(compiled_miden_rust_assets)]
+static COUNTER_CONTRACT_PACKAGE: LazyLock<Package> = LazyLock::new(|| {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/counter_contract.masp"));
+    Package::read_from_bytes(bytes).expect("counter contract package should be valid")
+});
+
+#[cfg(not(compiled_miden_rust_assets))]
 static COUNTER_PROGRAM_LIBRARY: LazyLock<Library> = LazyLock::new(|| {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/counter_program.masl"));
     Library::read_from_bytes(bytes).expect("counter program library should be valid")
@@ -44,33 +76,64 @@ pub struct CounterComponent {
     pub owner_account_id: AccountId,
 }
 
-impl From<CounterComponent> for AccountComponent {
-    fn from(component: CounterComponent) -> Self {
-        let owner_account_id_prefix = component.owner_account_id.prefix().as_felt();
-        let owner_account_id_suffix = component.owner_account_id.suffix();
+impl TryFrom<CounterComponent> for AccountComponent {
+    type Error = anyhow::Error;
 
-        let owner_id_slot = StorageSlot::with_value(
-            OWNER_SLOT_NAME.clone(),
-            Word::from([owner_account_id_suffix, owner_account_id_prefix, Felt::ZERO, Felt::ZERO]),
-        );
+    fn try_from(component: CounterComponent) -> Result<Self> {
+        #[cfg(compiled_miden_rust_assets)]
+        {
+            let owner_account_id_prefix = component.owner_account_id.prefix().as_felt();
+            let owner_account_id_suffix = component.owner_account_id.suffix();
 
-        let counter_slot = StorageSlot::with_value(COUNTER_SLOT_NAME.clone(), Word::empty());
+            let mut init_storage_data = InitStorageData::default();
+            init_storage_data.insert_value(
+                StorageValueName::from_slot_name(&*OWNER_SLOT_NAME),
+                Word::from([
+                    Felt::ZERO,
+                    Felt::ZERO,
+                    owner_account_id_suffix,
+                    owner_account_id_prefix,
+                ]),
+            )?;
+            init_storage_data
+                .insert_value(StorageValueName::from_slot_name(&*COUNTER_SLOT_NAME), Felt::ZERO)?;
 
-        let metadata = AccountComponentMetadata::new("counter::program", AccountType::all());
+            AccountComponent::from_package(&COUNTER_CONTRACT_PACKAGE, &init_storage_data)
+                .map_err(Into::into)
+        }
 
-        AccountComponent::new(
-            COUNTER_PROGRAM_LIBRARY.clone(),
-            vec![counter_slot, owner_id_slot],
-            metadata,
-        )
-        .expect("counter component should be valid")
+        #[cfg(not(compiled_miden_rust_assets))]
+        {
+            let owner_account_id_prefix = component.owner_account_id.prefix().as_felt();
+            let owner_account_id_suffix = component.owner_account_id.suffix();
+
+            let owner_id_slot = StorageSlot::with_value(
+                OWNER_SLOT_NAME.clone(),
+                Word::from([
+                    owner_account_id_suffix,
+                    owner_account_id_prefix,
+                    Felt::ZERO,
+                    Felt::ZERO,
+                ]),
+            );
+
+            let counter_slot = StorageSlot::with_value(COUNTER_SLOT_NAME.clone(), Word::empty());
+            let metadata = AccountComponentMetadata::new("counter::program", AccountType::all());
+
+            AccountComponent::new(
+                COUNTER_PROGRAM_LIBRARY.clone(),
+                vec![counter_slot, owner_id_slot],
+                metadata,
+            )
+            .map_err(Into::into)
+        }
     }
 }
 
 /// Create a counter program account.
 #[instrument(target = COMPONENT, name = "create-counter-account", skip_all, ret(level = "debug"))]
 pub fn create_counter_account(owner_account_id: AccountId) -> Result<Account> {
-    let counter_component: AccountComponent = CounterComponent { owner_account_id }.into();
+    let counter_component: AccountComponent = CounterComponent { owner_account_id }.try_into()?;
     let incr_nonce_auth: AccountComponent = IncrNonceAuthComponent.into();
 
     let init_seed: [u8; 32] = rand::random();
