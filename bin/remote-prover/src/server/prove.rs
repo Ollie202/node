@@ -6,21 +6,10 @@ use crate::server::service::ProverService;
 
 #[tonic::async_trait]
 impl grpc::server::remote_prover_api::Prove for ProverService {
-    type Input = grpc::remote_prover::ProofRequest;
+    type Input = (ProofKind, grpc::remote_prover::ProofRequest);
     type Output = grpc::remote_prover::Proof;
 
-    async fn full(
-        &self,
-        request: grpc::remote_prover::ProofRequest,
-    ) -> tonic::Result<grpc::remote_prover::Proof> {
-        // Check that the proof type is supported.
-        // Protobuf enums return a default value if the enum is set to an unknown value.
-        // This round trip checks that the value is valid.
-        if request.proof_type() as i32 != request.proof_type {
-            return Err(tonic::Status::invalid_argument("unknown proof_type value"));
-        }
-
-        let proof_kind = ProofKind::from(request.proof_type());
+    async fn handle(&self, (proof_kind, request): Self::Input) -> tonic::Result<Self::Output> {
         tracing::Span::current().set_attribute("request.kind", proof_kind);
 
         // Reject unsupported proof types early so they don't clog the queue.
@@ -40,15 +29,18 @@ impl grpc::server::remote_prover_api::Prove for ProverService {
         prover.prove(request).await
     }
 
-    async fn handle(&self, _input: Self::Input) -> tonic::Result<Self::Output> {
-        unimplemented!()
+    fn decode(request: grpc::remote_prover::ProofRequest) -> tonic::Result<Self::Input> {
+        // Check that the proof type is supported.
+        // Protobuf enums return a default value if the enum is set to an unknown value.
+        // This round trip checks that the value is valid.
+        if request.proof_type() as i32 != request.proof_type {
+            return Err(tonic::Status::invalid_argument("unknown proof_type value"));
+        }
+
+        Ok((ProofKind::from(request.proof_type()), request))
     }
 
-    fn decode(_request: grpc::remote_prover::ProofRequest) -> tonic::Result<Self::Input> {
-        unimplemented!()
-    }
-
-    fn encode(_output: Self::Output) -> tonic::Result<grpc::remote_prover::Proof> {
-        unimplemented!()
+    fn encode(output: Self::Output) -> tonic::Result<grpc::remote_prover::Proof> {
+        Ok(output)
     }
 }

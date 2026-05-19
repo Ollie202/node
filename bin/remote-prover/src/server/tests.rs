@@ -42,98 +42,107 @@ impl Client {
     }
 }
 
-/// Generates a proof request for a transaction using [`MockChain`].
-fn proof_request_from_tx(tx: &ExecutedTransaction) -> ProofRequest {
-    let tx_inputs = tx.tx_inputs().clone();
+trait ProofRequestExt {
+    /// Generates a proof request for a transaction using [`MockChain`].
+    fn from_tx(tx: &ExecutedTransaction) -> ProofRequest;
+    fn from_batch(batch: &ProposedBatch) -> ProofRequest;
+    async fn mock_tx() -> ExecutedTransaction;
+    async fn mock_batch() -> ProposedBatch;
+}
 
-    ProofRequest {
-        proof_type: ProofType::Transaction as i32,
-        payload: tx_inputs.to_bytes(),
+impl ProofRequestExt for ProofRequest {
+    fn from_tx(tx: &ExecutedTransaction) -> ProofRequest {
+        let tx_inputs = tx.tx_inputs().clone();
+
+        ProofRequest {
+            proof_type: ProofType::Transaction as i32,
+            payload: tx_inputs.to_bytes(),
+        }
     }
-}
 
-fn proof_request_from_batch(batch: &ProposedBatch) -> ProofRequest {
-    ProofRequest {
-        proof_type: ProofType::Batch as i32,
-        payload: batch.to_bytes(),
+    fn from_batch(batch: &ProposedBatch) -> ProofRequest {
+        ProofRequest {
+            proof_type: ProofType::Batch as i32,
+            payload: batch.to_bytes(),
+        }
     }
-}
 
-async fn mock_tx() -> ExecutedTransaction {
-    // Create a mock transaction to send to the server
-    let mut mock_chain_builder = MockChainBuilder::new();
-    let account = mock_chain_builder
-        .add_existing_wallet(Auth::BasicAuth {
-            auth_scheme: AuthScheme::Falcon512Poseidon2,
-        })
-        .unwrap();
+    async fn mock_tx() -> ExecutedTransaction {
+        // Create a mock transaction to send to the server
+        let mut mock_chain_builder = MockChainBuilder::new();
+        let account = mock_chain_builder
+            .add_existing_wallet(Auth::BasicAuth {
+                auth_scheme: AuthScheme::Falcon512Poseidon2,
+            })
+            .unwrap();
 
-    let fungible_asset_1: Asset =
-        FungibleAsset::new(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET.try_into().unwrap(), 100)
+        let fungible_asset_1: Asset =
+            FungibleAsset::new(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET.try_into().unwrap(), 100)
+                .unwrap()
+                .into();
+        let note_1 = mock_chain_builder
+            .add_p2id_note(
+                ACCOUNT_ID_SENDER.try_into().unwrap(),
+                account.id(),
+                &[fungible_asset_1],
+                NoteType::Private,
+            )
+            .unwrap();
+
+        let mock_chain = mock_chain_builder.build().unwrap();
+
+        let tx_context = mock_chain
+            .build_tx_context(account.id(), &[note_1.id()], &[])
             .unwrap()
-            .into();
-    let note_1 = mock_chain_builder
-        .add_p2id_note(
-            ACCOUNT_ID_SENDER.try_into().unwrap(),
-            account.id(),
-            &[fungible_asset_1],
-            NoteType::Private,
-        )
-        .unwrap();
+            .disable_debug_mode()
+            .build()
+            .unwrap();
 
-    let mock_chain = mock_chain_builder.build().unwrap();
+        Box::pin(tx_context.execute()).await.unwrap()
+    }
 
-    let tx_context = mock_chain
-        .build_tx_context(account.id(), &[note_1.id()], &[])
-        .unwrap()
-        .disable_debug_mode()
-        .build()
-        .unwrap();
+    async fn mock_batch() -> ProposedBatch {
+        // Create a mock transaction to send to the server
+        let mut mock_chain_builder = MockChainBuilder::new();
+        let account = mock_chain_builder
+            .add_existing_wallet(Auth::BasicAuth {
+                auth_scheme: AuthScheme::Falcon512Poseidon2,
+            })
+            .unwrap();
 
-    Box::pin(tx_context.execute()).await.unwrap()
-}
+        let fungible_asset_1: Asset =
+            FungibleAsset::new(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET.try_into().unwrap(), 100)
+                .unwrap()
+                .into();
+        let note_1 = mock_chain_builder
+            .add_p2id_note(
+                ACCOUNT_ID_SENDER.try_into().unwrap(),
+                account.id(),
+                &[fungible_asset_1],
+                NoteType::Private,
+            )
+            .unwrap();
 
-async fn mock_batch() -> ProposedBatch {
-    // Create a mock transaction to send to the server
-    let mut mock_chain_builder = MockChainBuilder::new();
-    let account = mock_chain_builder
-        .add_existing_wallet(Auth::BasicAuth {
-            auth_scheme: AuthScheme::Falcon512Poseidon2,
-        })
-        .unwrap();
+        let mock_chain = mock_chain_builder.build().unwrap();
 
-    let fungible_asset_1: Asset =
-        FungibleAsset::new(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET.try_into().unwrap(), 100)
+        let tx = mock_chain
+            .build_tx_context(account.id(), &[note_1.id()], &[])
             .unwrap()
-            .into();
-    let note_1 = mock_chain_builder
-        .add_p2id_note(
-            ACCOUNT_ID_SENDER.try_into().unwrap(),
-            account.id(),
-            &[fungible_asset_1],
-            NoteType::Private,
+            .disable_debug_mode()
+            .build()
+            .unwrap();
+
+        let tx = Box::pin(tx.execute()).await.unwrap();
+        let tx = LocalTransactionProver::default().prove(tx.tx_inputs().clone()).await.unwrap();
+
+        ProposedBatch::new(
+            vec![Arc::new(tx)],
+            mock_chain.latest_block_header(),
+            mock_chain.latest_partial_blockchain(),
+            BTreeMap::new(),
         )
-        .unwrap();
-
-    let mock_chain = mock_chain_builder.build().unwrap();
-
-    let tx = mock_chain
-        .build_tx_context(account.id(), &[note_1.id()], &[])
         .unwrap()
-        .disable_debug_mode()
-        .build()
-        .unwrap();
-
-    let tx = Box::pin(tx.execute()).await.unwrap();
-    let tx = LocalTransactionProver::default().prove(tx.tx_inputs().clone()).await.unwrap();
-
-    ProposedBatch::new(
-        vec![Arc::new(tx)],
-        mock_chain.latest_block_header(),
-        mock_chain.latest_partial_blockchain(),
-        BTreeMap::new(),
-    )
-    .unwrap()
+    }
 }
 
 // Test helpers for the server.
@@ -185,7 +194,7 @@ async fn legacy_behaviour_with_capacity_1() {
         .await
         .expect("server should spawn");
 
-    let request = proof_request_from_tx(&mock_tx().await);
+    let request = ProofRequest::from_tx(&ProofRequest::mock_tx().await);
 
     let mut client_a = Client::connect(port).await;
     let mut client_b = client_a.clone();
@@ -220,7 +229,7 @@ async fn capacity_is_respected() {
         .await
         .expect("server should spawn");
 
-    let request = proof_request_from_tx(&mock_tx().await);
+    let request = ProofRequest::from_tx(&ProofRequest::mock_tx().await);
     let mut client_a = Client::connect(port).await;
     let mut client_b = client_a.clone();
     let mut client_c = client_a.clone();
@@ -262,7 +271,7 @@ async fn timeout_is_respected() {
         .await
         .expect("server should spawn");
 
-    let request = proof_request_from_tx(&mock_tx().await);
+    let request = ProofRequest::from_tx(&ProofRequest::mock_tx().await);
 
     let mut client_a = Client::connect(port).await;
     let mut client_b = Client::connect(port).await;
@@ -293,7 +302,7 @@ async fn invalid_proof_kind_is_rejected() {
         .await
         .expect("server should spawn");
 
-    let mut request = proof_request_from_tx(&mock_tx().await);
+    let mut request = ProofRequest::from_tx(&ProofRequest::mock_tx().await);
     request.proof_type = i32::MAX;
 
     let mut client = Client::connect(port).await;
@@ -320,7 +329,7 @@ async fn unsupported_proof_kind_is_rejected() {
         .await
         .expect("server should spawn");
 
-    let request = proof_request_from_tx(&mock_tx().await);
+    let request = ProofRequest::from_tx(&ProofRequest::mock_tx().await);
 
     let mut client = Client::connect(port).await;
     let response = client.submit_request(request).await;
@@ -343,8 +352,8 @@ async fn transaction_proof_is_correct() {
         .await
         .expect("server should spawn");
 
-    let tx = mock_tx().await;
-    let request = proof_request_from_tx(&tx);
+    let tx = ProofRequest::mock_tx().await;
+    let request = ProofRequest::from_tx(&tx);
 
     let mut client = Client::connect(port).await;
     let response = client.submit_request(request).await.unwrap();
@@ -368,8 +377,8 @@ async fn batch_proof_is_correct() {
         .await
         .expect("server should spawn");
 
-    let batch = mock_batch().await;
-    let request = proof_request_from_batch(&batch);
+    let batch = ProofRequest::mock_batch().await;
+    let request = ProofRequest::from_batch(&batch);
 
     let mut client = Client::connect(port).await;
     let response = client.submit_request(request).await.unwrap();
